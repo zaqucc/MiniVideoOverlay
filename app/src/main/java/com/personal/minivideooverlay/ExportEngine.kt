@@ -14,7 +14,6 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.view.Surface
-import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -26,34 +25,39 @@ import kotlin.math.min
 class ExportException(message: String) : Exception(message)
 
 /**
- * One-shot export pipeline. Create a new instance for every export; do not reuse it.
+ * One-shot export pipeline. Create a new instance for every export.
  *
- *   video file -> MediaCodec decoder -> SurfaceTexture (OES) -> GlCompositor
- *       -> encoder input Surface -> MediaCodec H.264 encoder -> MediaMuxer (MP4)
- *   audio track -> copied packet-by-packet (no re-encode), interleaved by timestamp
+ *   video track -> MediaCodec decoder -> SurfaceTexture -> GlCompositor (blur, shadow, photo)
+ *       -> encoder input Surface -> MediaCodec H.264 -> MediaMuxer (MP4, video only)
  *
- * The output is written into MediaStore with IS_PENDING set, so a partial file never
- * shows up as a finished video. On failure the pending entry is deleted.
+ * Output is always exactly OverlayConfig.OUTPUT_DURATION_US long. If the source is longer,
+ * decoding stops at 15 s. If it is shorter, the source is decoded again from its start
+ * (loop) with timestamps continued, until 15 s is reached. The audio track is never read,
+ * so the output MP4 has no audio stream.
+ *
+ * The output is written to MediaStore with IS_PENDING set. On failure the entry is deleted.
  */
 class ExportEngine(private val appContext: Context) {
 
     class Result(val uri: Uri, val fileName: String)
 
+    private class PassResult(
+        val firstSrcUs: Long,
+        val lastSrcUs: Long,
+        val framesRendered: Int,
+        val reachedTarget: Boolean
+    )
+
     @Volatile private var cancelled = false
     private val frameSignal = Semaphore(0)
     private val encoderInfo = MediaCodec.BufferInfo()
 
-    // Encoder/muxer state shared by the drain helpers. Set during export().
     private var encoder: MediaCodec? = null
     private var muxer: MediaMuxer? = null
-    private var audioExtractor: MediaExtractor? = null
-    private var audioFormat: MediaFormat? = null
-    private var audioBuffer: ByteBuffer? = null
     private var videoTrack = -1
-    private var audioTrack = -1
     private var muxerStarted = false
 
-    /** Requests cancellation. The export stops at the next frame and the output is deleted. */
+    /** Requests cancellation. The export stops at the next step and its output is deleted. */
     fun cancel() {
         cancelled = true
     }
@@ -67,22 +71,19 @@ class ExportEngine(private val appContext: Context) {
         val outUri = insertPendingOutput(fileName)
 
         var success = false
+        var resultName = fileName
         var videoPfd: ParcelFileDescriptor? = null
-        var audioPfd: ParcelFileDescriptor? = null
         var outPfd: ParcelFileDescriptor? = null
         val videoExtractor = MediaExtractor()
-        val audioEx = MediaExtractor()
-        var decoder: MediaCodec? = null
         var decoderSurface: Surface? = null
         var surfaceTexture: SurfaceTexture? = null
         var compositor: GlCompositor? = null
-        var resultName = fileName
 
         try {
             outPfd = resolver.openFileDescriptor(outUri, "rw")
                 ?: throw ExportException("Cannot open the output file")
 
-            // ----- Input video -----
+            // ----- Source video: only the video track is selected. Audio is never read. -----
             videoPfd = resolver.openFileDescriptor(videoUri, "r")
                 ?: throw ExportException("Cannot open the selected video")
             videoExtractor.setDataSource(videoPfd.fileDescriptor)
@@ -92,16 +93,13 @@ class ExportEngine(private val appContext: Context) {
             val srcFormat = videoExtractor.getTrackFormat(videoIndex)
             val srcMime = srcFormat.getString(MediaFormat.KEY_MIME)
                 ?: throw ExportException("Unknown video format")
-            val durationUs = if (srcFormat.containsKey(MediaFormat.KEY_DURATION))
-                srcFormat.getLong(MediaFormat.KEY_DURATION) else 0L
-            if (durationUs <= 0L) throw ExportException("Video duration could not be read")
 
             val frameRate = runCatching { srcFormat.getInteger(MediaFormat.KEY_FRAME_RATE) }
                 .getOrNull()?.coerceIn(1, OverlayConfig.MAX_FRAME_RATE)
                 ?: OverlayConfig.DEFAULT_FRAME_RATE
             val frameDurUs = 1_000_000L / frameRate
 
-            // Aspect ratio after rotation metadata, used for the center-crop.
+            // Aspect ratio after rotation metadata, for the center-crop to 9:16.
             val srcW = srcFormat.getInteger(MediaFormat.KEY_WIDTH)
             val srcH = srcFormat.getInteger(MediaFormat.KEY_HEIGHT)
             val rotation = if (srcFormat.containsKey(ROTATION_KEY)) srcFormat.getInteger(ROTATION_KEY) else 0
@@ -114,9 +112,16 @@ class ExportEngine(private val appContext: Context) {
             val cropX = if (wider) targetAspect / sourceAspect else 1f
             val cropY = if (wider) 1f else sourceAspect / targetAspect
 
-            // ----- Encoder -----
+            // ----- Encoder: fail clearly if 1080x1920 is not supported. No fallback resolution. -----
             val enc = MediaCodec.createEncoderByType(OverlayConfig.MIME_AVC)
             encoder = enc
+            val caps = enc.codecInfo.getCapabilitiesForType(OverlayConfig.MIME_AVC).videoCapabilities
+            if (!caps.isSizeSupported(OverlayConfig.OUTPUT_WIDTH, OverlayConfig.OUTPUT_HEIGHT)) {
+                throw ExportException(
+                    "This device's H.264 encoder cannot produce 1080×1920. " +
+                        "No lower-resolution output is created."
+                )
+            }
             val encFormat = MediaFormat.createVideoFormat(
                 OverlayConfig.MIME_AVC, OverlayConfig.OUTPUT_WIDTH, OverlayConfig.OUTPUT_HEIGHT
             ).apply {
@@ -129,22 +134,9 @@ class ExportEngine(private val appContext: Context) {
             val encSurface = enc.createInputSurface()
             enc.start()
 
-            // ----- Muxer -----
             muxer = MediaMuxer(outPfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
 
-            // ----- Optional audio (copied, not re-encoded) -----
-            audioPfd = resolver.openFileDescriptor(videoUri, "r")
-                ?: throw ExportException("Cannot reopen the selected video")
-            audioEx.setDataSource(audioPfd.fileDescriptor)
-            val audioIndex = findTrack(audioEx, "audio/")
-            if (audioIndex != null) {
-                audioEx.selectTrack(audioIndex)
-                audioFormat = audioEx.getTrackFormat(audioIndex)
-                audioBuffer = ByteBuffer.allocateDirect(OverlayConfig.AUDIO_BUFFER_BYTES)
-                audioExtractor = audioEx
-            }
-
-            // ----- GL compositor and decoder -----
+            // ----- GL compositor, decoder output texture, decoder surface -----
             val comp = GlCompositor(encSurface, overlay)
             compositor = comp
             overlay.recycle()
@@ -155,68 +147,31 @@ class ExportEngine(private val appContext: Context) {
             val dSurface = Surface(texture)
             decoderSurface = dSurface
 
-            val dec = MediaCodec.createDecoderByType(srcMime)
-            decoder = dec
-            dec.configure(srcFormat, dSurface, null, 0)
-            dec.start()
-
-            // ----- Main loop: decode -> render -> encode -----
-            val stMatrix = FloatArray(16)
-            val info = MediaCodec.BufferInfo()
-            var inputDone = false
-            var outputDone = false
-            var lastPtsUs = 0L
-
-            while (!outputDone) {
+            // ----- Decode / render passes until 15 s is reached (trim or loop) -----
+            var outputBaseUs = 0L
+            while (true) {
                 checkCancelled()
-
-                if (!inputDone) {
-                    val inIdx = dec.dequeueInputBuffer(OverlayConfig.CODEC_TIMEOUT_US)
-                    if (inIdx >= 0) {
-                        val buf = dec.getInputBuffer(inIdx)
-                            ?: throw ExportException("Decoder input buffer unavailable")
-                        val size = videoExtractor.readSampleData(buf, 0)
-                        if (size < 0) {
-                            dec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            inputDone = true
-                        } else {
-                            dec.queueInputBuffer(inIdx, 0, size, videoExtractor.sampleTime, 0)
-                            videoExtractor.advance()
-                        }
-                    }
+                videoExtractor.seekTo(0L, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                val pass = renderPass(
+                    videoExtractor, srcMime, srcFormat, dSurface, texture, comp,
+                    cropX, cropY, outputBaseUs, frameDurUs
+                ) { outUs ->
+                    onProgress((outUs * 100L / OverlayConfig.OUTPUT_DURATION_US).toInt().coerceIn(0, 99))
                 }
-
-                val outIdx = dec.dequeueOutputBuffer(info, OverlayConfig.CODEC_TIMEOUT_US)
-                if (outIdx >= 0) {
-                    val hasFrame = info.size > 0
-                    val eos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-                    dec.releaseOutputBuffer(outIdx, hasFrame)
-                    if (hasFrame) {
-                        awaitFrame()
-                        texture.updateTexImage()
-                        texture.getTransformMatrix(stMatrix)
-                        val ptsNs = texture.timestamp
-                        comp.drawFrame(stMatrix, cropX, cropY, ptsNs)
-                        lastPtsUs = ptsNs / 1000L
-                        drainEncoder(endOfStream = false)
-                        onProgress(progressOf(lastPtsUs, durationUs))
-                    }
-                    if (eos) outputDone = true
-                }
+                if (pass.reachedTarget) break
+                if (pass.framesRendered == 0) throw ExportException("No frames could be decoded from the video")
+                // Pass ended before 15 s: the next pass continues the timeline from here.
+                outputBaseUs += pass.lastSrcUs - pass.firstSrcUs + frameDurUs
             }
 
             // ----- Finish -----
             enc.signalEndOfInputStream()
             drainEncoder(endOfStream = true)
-            drainAudioUntil(lastPtsUs + frameDurUs)
-
             if (!muxerStarted) throw ExportException("Encoder produced no output. The video may be unsupported.")
             muxer?.stop()
             success = true
             resultName = queryDisplayName(outUri) ?: fileName
         } finally {
-            runCatching { decoder?.stop() }
-            runCatching { decoder?.release() }
             runCatching { decoderSurface?.release() }
             runCatching { surfaceTexture?.release() }
             runCatching { compositor?.release() }
@@ -224,15 +179,12 @@ class ExportEngine(private val appContext: Context) {
             runCatching { encoder?.release() }
             runCatching { muxer?.release() }
             runCatching { videoExtractor.release() }
-            runCatching { audioEx.release() }
             runCatching { videoPfd?.close() }
-            runCatching { audioPfd?.close() }
             runCatching { outPfd?.close() }
             encoder = null
             muxer = null
-            audioExtractor = null
-            audioBuffer = null
             muxerStarted = false
+            videoTrack = -1
 
             if (success) {
                 finalizePendingOutput(outUri)
@@ -244,8 +196,97 @@ class ExportEngine(private val appContext: Context) {
         return Result(outUri, resultName)
     }
 
+    /**
+     * Decodes the source from its start and renders frames whose output time is below 15 s.
+     * Output time = outputBaseUs + (source pts - first source pts of this pass).
+     * A new decoder is created per pass so that every pass starts cleanly with EOS.
+     */
+    private fun renderPass(
+        extractor: MediaExtractor,
+        srcMime: String,
+        srcFormat: MediaFormat,
+        surface: Surface,
+        texture: SurfaceTexture,
+        comp: GlCompositor,
+        cropX: Float,
+        cropY: Float,
+        outputBaseUs: Long,
+        frameDurUs: Long,
+        onFrame: (Long) -> Unit
+    ): PassResult {
+        val dec = MediaCodec.createDecoderByType(srcMime)
+        val stMatrix = FloatArray(16)
+        val info = MediaCodec.BufferInfo()
+        var firstSrcUs = -1L
+        var lastSrcUs = 0L
+        var framesRendered = 0
+        var reachedTarget = false
+        try {
+            dec.configure(srcFormat, surface, null, 0)
+            dec.start()
+            var inputDone = false
+            var outputDone = false
+
+            while (!outputDone) {
+                checkCancelled()
+
+                if (!inputDone) {
+                    val inIdx = dec.dequeueInputBuffer(OverlayConfig.CODEC_TIMEOUT_US)
+                    if (inIdx >= 0) {
+                        val buf = dec.getInputBuffer(inIdx)
+                            ?: throw ExportException("Decoder input buffer unavailable")
+                        val size = extractor.readSampleData(buf, 0)
+                        if (size < 0) {
+                            dec.queueInputBuffer(inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                        } else {
+                            dec.queueInputBuffer(inIdx, 0, size, extractor.sampleTime, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+
+                val outIdx = dec.dequeueOutputBuffer(info, OverlayConfig.CODEC_TIMEOUT_US)
+                if (outIdx < 0) continue
+
+                val eos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                if (info.size > 0) {
+                    val srcUs = info.presentationTimeUs
+                    if (firstSrcUs < 0L) firstSrcUs = srcUs
+                    lastSrcUs = srcUs
+                    val outUs = outputBaseUs + (srcUs - firstSrcUs)
+
+                    if (outUs + frameDurUs > OverlayConfig.OUTPUT_DURATION_US) {
+                        // Trim point reached: a frame that would run past 15.000 s, and
+                        // everything after it, is dropped so the file ends at 15 s.
+                        dec.releaseOutputBuffer(outIdx, false)
+                        reachedTarget = true
+                        break
+                    }
+
+                    dec.releaseOutputBuffer(outIdx, true)
+                    awaitFrame()
+                    texture.updateTexImage()
+                    texture.getTransformMatrix(stMatrix)
+                    comp.drawFrame(stMatrix, cropX, cropY, outUs * 1000L)
+                    drainEncoder(endOfStream = false)
+                    framesRendered++
+                    onFrame(outUs)
+                } else {
+                    dec.releaseOutputBuffer(outIdx, false)
+                }
+
+                if (eos) outputDone = true
+            }
+        } finally {
+            runCatching { dec.stop() }
+            runCatching { dec.release() }
+        }
+        return PassResult(firstSrcUs, lastSrcUs, framesRendered, reachedTarget)
+    }
+
     // ------------------------------------------------------------------
-    // Encoder drain and audio interleave
+    // Encoder drain (video only)
     // ------------------------------------------------------------------
 
     private fun drainEncoder(endOfStream: Boolean) {
@@ -265,7 +306,6 @@ class ExportEngine(private val appContext: Context) {
                 }
                 idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                     videoTrack = mux.addTrack(enc.outputFormat)
-                    audioFormat?.let { audioTrack = mux.addTrack(it) }
                     mux.start()
                     muxerStarted = true
                 }
@@ -279,36 +319,11 @@ class ExportEngine(private val appContext: Context) {
                         buf.position(encoderInfo.offset)
                         buf.limit(encoderInfo.offset + encoderInfo.size)
                         mux.writeSampleData(videoTrack, buf, encoderInfo)
-                        drainAudioUntil(encoderInfo.presentationTimeUs)
                     }
                     enc.releaseOutputBuffer(idx, false)
                     if ((encoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) return
                 }
             }
-        }
-    }
-
-    /** Writes audio packets whose timestamp is at or before [limitUs]. */
-    private fun drainAudioUntil(limitUs: Long) {
-        val ex = audioExtractor ?: return
-        val buf = audioBuffer ?: return
-        val mux = muxer ?: return
-        if (audioTrack < 0 || !muxerStarted) return
-        val info = MediaCodec.BufferInfo()
-        while (ex.sampleTrackIndex >= 0 && ex.sampleTime <= limitUs) {
-            buf.clear()
-            val size = ex.readSampleData(buf, 0)
-            if (size < 0) break
-            buf.position(0)
-            buf.limit(size)
-            val flags = if ((ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
-                MediaCodec.BUFFER_FLAG_KEY_FRAME
-            } else {
-                0
-            }
-            info.set(0, size, ex.sampleTime, flags)
-            mux.writeSampleData(audioTrack, buf, info)
-            ex.advance()
         }
     }
 
@@ -326,9 +341,6 @@ class ExportEngine(private val appContext: Context) {
         if (cancelled) throw ExportException("Export cancelled")
     }
 
-    private fun progressOf(ptsUs: Long, durationUs: Long): Int =
-        (ptsUs * 100L / durationUs).toInt().coerceIn(0, 99)
-
     private fun findTrack(ex: MediaExtractor, mimePrefix: String): Int? {
         for (i in 0 until ex.trackCount) {
             val mime = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
@@ -338,8 +350,8 @@ class ExportEngine(private val appContext: Context) {
     }
 
     /**
-     * Decodes the photo (EXIF orientation applied), center-crops to a square,
-     * and scales it to OVERLAY_SIZE. No stretching.
+     * Decodes the photo (EXIF orientation applied), center-crops it to a square,
+     * and scales it to OVERLAY_SIZE without stretching.
      */
     private fun decodeSquareOverlay(photoUri: Uri): Bitmap {
         val decoded: Bitmap = try {
