@@ -13,10 +13,10 @@ This document follows the user-provided `instruksi.md`. It supersedes earlier dr
 
 ## Audio
 
-- Original video audio and one optional added music file are decoded locally.
+- Original video audio and an optional ordered playlist of added music files are decoded locally.
 - Both sources are converted to 48 kHz stereo signed-16 PCM using bounded processing and temporary cache files.
 - Separate gain values are applied from 0–100%; sources are mixed into one AAC-LC track.
-- Music starts at output time zero, loops from its beginning when shorter, and is cut at the video timeline end.
+- The ordered music playlist starts at output time zero, loops from its beginning when shorter than the video, and is cut at the video timeline end.
 - If the video has no audio, music-only export is supported. If neither source exists, output has no audio track.
 - Clipping is softened at PCM conversion. No auto-normalization, compressor, ducking, or crossfade is applied.
 
@@ -43,3 +43,21 @@ This document follows the user-provided `instruksi.md`. It supersedes earlier dr
 - Frame rate is preserved through source presentation timestamps; encoder configuration falls back to a lower supported frame-rate hint if needed.
 - Preview uses Android MediaPlayer and may support fewer input codecs than the export decoder pipeline.
 - A device-specific codec, EGL, thermal, storage, or memory failure may prevent export. Full device validation is still required.
+
+
+## MiniVideoOverlay 2.2 — Playlist Musik
+- Pengguna dapat memilih beberapa file audio sekaligus melalui Android Storage Access Framework.
+- Playlist diputar berurutan tanpa jeda antar-track.
+- Playlist diulang dari awal selama durasi video masih berjalan.
+- Audio gameplay tetap dicampur dengan playlist dan kedua gain tetap terpisah.
+- Semua sumber musik didekode bertahap ke PCM sementara; RAM tidak menampung seluruh audio.
+- Output tetap satu track AAC dengan durasi mengikuti video.
+
+
+## MiniVideoOverlay 2.2.1 — Music Track Notification
+- Track playlist dibaca metadata durasinya sebelum rendering visual agar pergantian judul dapat diselaraskan dengan timeline video.
+- Saat setiap track dimulai, kartu kecil ditampilkan di pojok kiri atas selama 3 detik dengan fade-in 250 ms dan fade-out 350 ms.
+- Kartu menampilkan ikon musik, judul, dan artis; latar gelap semi-transparan dengan aksen biru.
+- Kartu adalah lapisan OpenGL terpisah di atas PNG dan video, sehingga tidak mengubah PNG sumber.
+- Timeline notifikasi mengikuti urutan playlist yang sama dan mengulang bersama playlist sampai video selesai.
+- Durasi metadata dibatasi ke durasi video per track, konsisten dengan batas decode playlist saat ini.

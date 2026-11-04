@@ -75,3 +75,30 @@ The provided source archive did not contain a Gradle wrapper. The GitHub Actions
 7. Export. The output is published in `Movies/MiniVideoOverlay` after successful muxing.
 
 Do not treat this implementation as device-validated until the tests in `instruksi.md` have been run against real media on a physical Android device.
+
+
+## Update 2.1.0 — Background export UX
+
+- Export now runs in `ExportService`, a foreground service independent of `MainActivity` lifecycle.
+- Notification shows export status/progress and includes a cancel action.
+- Activity no longer cancels rendering from `onDestroy`; leaving the screen does not itself cancel export.
+- Last successful output URI and filename are persisted in app preferences and restored when the app is reopened.
+- Android 13+ notification permission is requested so the progress notification can be visible in the notification drawer. Foreground-service visibility can still be limited by user/system notification settings.
+- Android 15 uses the `mediaProcessing` foreground-service type; earlier supported Android versions use `dataSync`.
+- This improves resilience but cannot guarantee survival if Android force-stops the app, the user force-stops it, the device reboots, or the system terminates the process under exceptional conditions.
+- Build/device verification remains required; this environment does not have an Android SDK/Gradle installation.
+
+
+## Update 2.2.1 — Music Track Notification
+
+### Implemented in source
+- Reads title, artist, and duration metadata for each selected playlist URI before video rendering; falls back to display filename and extractor duration when metadata retrieval is incomplete.
+- Maps the ordered playlist timeline to video presentation timestamps and repeats the cue sequence with the looping playlist.
+- Burns a compact top-left notification into the exported frames for 3 seconds after each track starts, with a 250 ms fade-in and 350 ms fade-out.
+- Renders notification as an independent transparent OpenGL texture above the existing PNG layer. The supplied PNG remains unchanged.
+- Version metadata updated to 2.2.1 / versionCode 6.
+
+### Validation status
+- Source-level review completed.
+- Android Gradle build and physical-device playback/export test were not run in this environment because Android SDK/Gradle are unavailable.
+- Verify on device that embedded title/artist metadata and duration metadata match the actual decoded track boundaries; container padding or unusual edit lists may cause small timing differences.
