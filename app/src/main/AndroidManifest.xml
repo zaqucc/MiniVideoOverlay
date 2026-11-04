@@ -13,8 +13,8 @@
     <application
         android:hardwareAccelerated="true"
         android:allowBackup="false"
-        android:icon="@android:drawable/sym_def_app_icon"
-        android:label="MiniVideoOverlay"
+        android:icon="@drawable/motionix_icon"
+        android:label="MOTIONIX"
         android:supportsRtl="false"
         android:theme="@android:style/Theme.DeviceDefault.Light.DarkActionBar">
 
