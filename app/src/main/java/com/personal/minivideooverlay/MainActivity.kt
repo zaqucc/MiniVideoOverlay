@@ -523,7 +523,7 @@ class MainActivity : Activity() {
                 }
             }
             val track = TextView(this).apply {
-                text = "%02d  %s\\n%s".format(index + 1, displayName(uri), mediaDuration(uri))
+                text = "%02d  %s\n%s".format(index + 1, displayName(uri), mediaDuration(uri))
                 textSize = 12f
                 setTextColor(Color.rgb(204, 215, 228))
                 maxLines = 2
@@ -583,11 +583,13 @@ class MainActivity : Activity() {
 
     private fun mediaDuration(uri: Uri): String = durationCache.getOrPut(uri.toString()) {
         val retriever = MediaMetadataRetriever()
-        return try {
+        try {
             retriever.setDataSource(this, uri)
-            val ms = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: return "durasi tidak diketahui"
-            val total = ms / 1000
-            "%02d:%02d".format(total / 60, total % 60)
+            val ms = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+            if (ms == null) "durasi tidak diketahui" else {
+                val total = ms / 1000
+                "%02d:%02d".format(total / 60, total % 60)
+            }
         } catch (_: Throwable) { "durasi tidak diketahui" }
         finally { runCatching { retriever.release() } }
     }
