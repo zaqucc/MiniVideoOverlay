@@ -80,6 +80,9 @@ class MainActivity : Activity() {
     private lateinit var previewButton: Button
     private lateinit var previewTexture: TextureView
     private var previewPlayer: MediaPlayer? = null
+    private var previewOverlayBitmap: Bitmap? = null
+    private val displayNameCache = mutableMapOf<String, String>()
+    private val durationCache = mutableMapOf<String, String>()
     private var previewSurface: Surface? = null
     private var previewRequested = false
     private lateinit var previewOverlay: ImageView
@@ -153,6 +156,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         releasePreview()
+        clearPreviewOverlay()
         super.onDestroy()
     }
 
@@ -465,6 +469,12 @@ class MainActivity : Activity() {
         previewTexture.setTransform(matrix)
     }
 
+    private fun clearPreviewOverlay() {
+        if (::previewOverlay.isInitialized) previewOverlay.setImageDrawable(null)
+        previewOverlayBitmap?.let { if (!it.isRecycled) it.recycle() }
+        previewOverlayBitmap = null
+    }
+
     private fun releasePreview() {
         runCatching { previewPlayer?.setSurface(null) }
         runCatching { previewPlayer?.stop() }
@@ -488,9 +498,11 @@ class MainActivity : Activity() {
             val dst = RectF((1920f - w) / 2f, (1080f - h) / 2f, (1920f + w) / 2f, (1080f + h) / 2f)
             canvas.drawBitmap(source, null, dst, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
             source.recycle()
+            clearPreviewOverlay()
+            previewOverlayBitmap = canvasBitmap
             previewOverlay.setImageBitmap(canvasBitmap)
         }.onFailure { error ->
-            previewOverlay.setImageDrawable(null)
+            clearPreviewOverlay()
             statusText.text = "PNG terpilih, tetapi preview gagal dimuat: ${error.message ?: error.javaClass.simpleName}"
         }
     }
@@ -562,10 +574,14 @@ class MainActivity : Activity() {
         progress.visibility = if (busy) View.VISIBLE else View.GONE
     }
 
-    private fun displayName(uri: Uri): String = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-        ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: uri.lastPathSegment ?: "file"
+    private fun displayName(uri: Uri): String = displayNameCache.getOrPut(uri.toString()) {
+        runCatching {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { if (it.moveToFirst()) it.getString(0) else null }
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment ?: "file"
+    }
 
-    private fun mediaDuration(uri: Uri): String {
+    private fun mediaDuration(uri: Uri): String = durationCache.getOrPut(uri.toString()) {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(this, uri)
