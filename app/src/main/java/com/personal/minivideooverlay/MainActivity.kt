@@ -344,6 +344,7 @@ class MainActivity : Activity() {
                 previewRequested = false
                 runCatching { previewPlayer?.pause() }
                 main.removeCallbacks(previewTicker)
+                if (previewPlayer == null) preparePreview()
                 updatePreviewButton()
             }
             onPlayheadChanged = { position ->
