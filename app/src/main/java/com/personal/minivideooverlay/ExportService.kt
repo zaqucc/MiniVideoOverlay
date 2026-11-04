@@ -48,6 +48,8 @@ class ExportService : Service() {
                 }
                 val videoVolume = intent.getIntExtra(EXTRA_VIDEO_VOLUME, 100)
                 val musicVolume = intent.getIntExtra(EXTRA_MUSIC_VOLUME, 100)
+                val trimStartMs = intent.getLongExtra(EXTRA_TRIM_START_MS, 0L)
+                val trimEndMs = intent.getLongExtra(EXTRA_TRIM_END_MS, 0L)
                 ExportServiceState.isRunning = true
                 ExportServiceState.progress = 0
                 ExportServiceState.message = "Menyiapkan ekspor…"
@@ -57,7 +59,7 @@ class ExportService : Service() {
                 engine = job
                 worker = Thread({
                     try {
-                        val result = job.export(video, png, music, videoVolume, musicVolume) { pct, message ->
+                        val result = job.export(video, png, music, videoVolume, musicVolume, trimStartMs, trimEndMs) { pct, message ->
                             publish(pct, message)
                         }
                         ExportServiceState.outputUri = result.uri.toString()
@@ -150,6 +152,7 @@ class ExportService : Service() {
         const val ACTION_STATE_CHANGED = "com.personal.minivideooverlay.EXPORT_STATE_CHANGED"
         const val EXTRA_VIDEO = "video"; const val EXTRA_PNG = "png"; const val EXTRA_MUSIC_LIST = "music_list"
         const val EXTRA_VIDEO_VOLUME = "video_volume"; const val EXTRA_MUSIC_VOLUME = "music_volume"
+        const val EXTRA_TRIM_START_MS = "trim_start_ms"; const val EXTRA_TRIM_END_MS = "trim_end_ms"
         const val EXTRA_PROGRESS = "progress"; const val EXTRA_MESSAGE = "message"
         const val EXTRA_OUTPUT = "output"; const val EXTRA_FILENAME = "filename"
         private const val CHANNEL_ID = "mvo_export"
