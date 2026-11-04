@@ -5,15 +5,14 @@ plugins {
 
 android {
     namespace = "com.personal.minivideooverlay"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.personal.minivideooverlay"
-        // minSdk 29: MediaStore RELATIVE_PATH and ImageDecoder EXIF handling.
         minSdk = 29
         targetSdk = 35
-        versionCode = 6
-        versionName = "2.2.1"
+        versionCode = 7
+        versionName = "3.0.0"
     }
 
     buildTypes {
@@ -37,4 +36,9 @@ android {
     }
 }
 
-// No third-party dependencies: only the Android framework and Kotlin stdlib are used.
+dependencies {
+    val media3Version = "1.11.1"
+    implementation("androidx.media3:media3-common:$media3Version")
+    implementation("androidx.media3:media3-effect:$media3Version")
+    implementation("androidx.media3:media3-transformer:$media3Version")
+}
