@@ -69,6 +69,8 @@ class ExportEngine(private val appContext: Context) {
         musicUris: List<Uri>,
         videoVolume: Int,
         musicVolume: Int,
+        trimStartMs: Long,
+        trimEndMs: Long,
         onProgress: (Int, String) -> Unit
     ): Result {
         state = ExportState.Validating
@@ -93,6 +95,8 @@ class ExportEngine(private val appContext: Context) {
             onProgress(3, "Menyusun timeline Media3…")
             val composition = buildComposition(
                 videoUri = videoUri,
+                trimStartMs = trimStartMs,
+                trimEndMs = trimEndMs,
                 overlayBitmap = overlayBitmap,
                 musicUris = if (musicVolume > 0) normalizedMusic else emptyList(),
                 cues = cues,
@@ -150,6 +154,8 @@ class ExportEngine(private val appContext: Context) {
 
     private fun buildComposition(
         videoUri: Uri,
+        trimStartMs: Long,
+        trimEndMs: Long,
         overlayBitmap: Bitmap,
         musicUris: List<Uri>,
         cues: List<MusicTrackCue>,
@@ -171,7 +177,13 @@ class ExportEngine(private val appContext: Context) {
             )
         )
         val videoAudioProcessors = if (includeVideoAudio) audioProcessors(videoGain) else emptyList()
-        val videoItem = EditedMediaItem.Builder(MediaItem.fromUri(videoUri))
+        val clipEndMs = trimEndMs.takeIf { it > 0L } ?: Long.MAX_VALUE
+        val clipping = MediaItem.ClippingConfiguration.Builder()
+            .setStartPositionMs(trimStartMs.coerceAtLeast(0L))
+            .setEndPositionMs(clipEndMs)
+            .build()
+        val clippedVideo = MediaItem.Builder().setUri(videoUri).setClippingConfiguration(clipping).build()
+        val videoItem = EditedMediaItem.Builder(clippedVideo)
             .setRemoveAudio(!includeVideoAudio)
             .setEffects(Effects(videoAudioProcessors, videoEffects))
             .build()
