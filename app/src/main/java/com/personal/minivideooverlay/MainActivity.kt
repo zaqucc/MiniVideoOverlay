@@ -101,10 +101,12 @@ class MainActivity : Activity() {
         when (requestCode) {
             REQ_VIDEO -> { videoUri = uri; releasePreview(); previewRequested = false }
             REQ_PNG -> {
-                val warning = validatePng(uri)
-                if (warning != null && !warning.startsWith("Peringatan:")) { statusText.text = warning; return }
+                // Simpan URI segera setelah pengguna memilih file. Validasi tidak boleh
+                // membatalkan pilihan, karena beberapa document provider menghasilkan
+                // metadata/decode bounds yang tidak lengkap meskipun file dapat dibaca.
                 pngUri = uri
-                if (warning != null) statusText.text = warning
+                val warning = validatePng(uri)
+                statusText.text = warning ?: "PNG berhasil dipilih: ${displayName(uri)}"
             }
             REQ_MUSIC -> musicUri = uri
         }
@@ -301,6 +303,9 @@ class MainActivity : Activity() {
             canvas.drawBitmap(source, null, dst, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
             source.recycle()
             previewOverlay.setImageBitmap(canvasBitmap)
+        }.onFailure { error ->
+            previewOverlay.setImageDrawable(null)
+            statusText.text = "PNG terpilih, tetapi preview gagal dimuat: ${error.message ?: error.javaClass.simpleName}"
         }
     }
 
