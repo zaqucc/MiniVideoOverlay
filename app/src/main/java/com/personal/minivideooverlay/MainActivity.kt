@@ -108,6 +108,8 @@ class MainActivity : Activity() {
             trimStartMs = it.getLong(KEY_TRIM_START, 0L)
             trimEndMs = it.getLong(KEY_TRIM_END, 0L)
         }
+        videoDurationMs = videoUri?.let { readDurationMs(it) } ?: 0L
+        if (trimEndMs <= 0L || (videoDurationMs > 0L && trimEndMs > videoDurationMs)) trimEndMs = videoDurationMs
         setContentView(buildUi())
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 2402)
@@ -349,7 +351,7 @@ class MainActivity : Activity() {
     }.getOrDefault(0L)
     private fun margin(top: Int) = LinearLayout.LayoutParams(-1, -2).apply { topMargin = top }
     private fun seekListener(changed: (Int) -> Unit) = object : SeekBar.OnSeekBarChangeListener {
-        override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) { changed(value) }
+        override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) { if (fromUser) changed(value) }
         override fun onStartTrackingTouch(seekBar: SeekBar?) {}
         override fun onStopTrackingTouch(seekBar: SeekBar?) {}
     }
