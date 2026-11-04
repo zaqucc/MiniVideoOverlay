@@ -1,434 +1,563 @@
 package com.personal.minivideooverlay
 
 import android.content.ContentValues
+import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.ImageDecoder
 import android.graphics.Paint
 import android.graphics.RectF
-import android.graphics.SurfaceTexture
-import android.media.MediaCodec
-import android.media.MediaCodecInfo
-import android.media.MediaExtractor
-import android.media.MediaFormat
-import android.media.MediaMuxer
+import android.graphics.Typeface
 import android.net.Uri
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
-import android.view.Surface
-import java.io.File
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.ChannelMixingAudioProcessor
+import androidx.media3.common.audio.ChannelMixingMatrix
+import androidx.media3.common.audio.DefaultGainProvider
+import androidx.media3.common.audio.GainProcessor
+import androidx.media3.common.audio.ToInt16PcmAudioProcessor
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.BitmapOverlay
+import androidx.media3.effect.OverlayEffect
+import androidx.media3.effect.Presentation
+import androidx.media3.effect.StaticOverlaySettings
+import androidx.media3.transformer.Composition
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
+import androidx.media3.transformer.Effects
+import androidx.media3.transformer.ProgressHolder
+import androidx.media3.transformer.Transformer
+import androidx.media3.transformer.TransformerOutput
+import androidx.media3.transformer.VideoEncoderSettings
+import androidx.media3.transformer.DefaultEncoderFactory
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.Semaphore
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import kotlin.math.abs
-import kotlin.math.max
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
+import kotlin.math.roundToInt
 
-class ExportException(message: String) : Exception(message)
+class ExportException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
+/** Media3-only export pipeline. Android framework APIs are used only for URI/bitmap/MediaStore I/O. */
+@OptIn(UnstableApi::class)
 class ExportEngine(private val appContext: Context) {
     data class Result(val uri: Uri, val fileName: String, val hasAudio: Boolean)
 
     @Volatile private var cancelled = false
     @Volatile var state: ExportState = ExportState.Idle
         private set
-    private val frameSignal = Semaphore(0)
-    private var videoEncoder: MediaCodec? = null
-    private var videoMuxer: MediaMuxer? = null
-    private var videoTrack = -1
-    private var videoMuxerStarted = false
-    private val encoderInfo = MediaCodec.BufferInfo()
+    @Volatile private var transformer: Transformer? = null
+    @Volatile private var transformerHandler: Handler? = null
 
-    fun cancel() { cancelled = true }
+    fun cancel() {
+        cancelled = true
+        transformerHandler?.post { runCatching { transformer?.cancel() } }
+    }
 
-    fun export(videoUri: Uri, pngUri: Uri, musicUris: List<Uri>, videoVolume: Int, musicVolume: Int,
-               onProgress: (Int, String) -> Unit): Result {
-        val resolver = appContext.contentResolver
+    fun export(
+        videoUri: Uri,
+        pngUri: Uri,
+        musicUris: List<Uri>,
+        videoVolume: Int,
+        musicVolume: Int,
+        onProgress: (Int, String) -> Unit
+    ): Result {
         state = ExportState.Validating
-        var overlay: Bitmap? = null
-        val videoTemp = File.createTempFile("mvo_video_", ".mp4", appContext.cacheDir)
-        var audioTemp: File? = null
+        var overlayBitmap: Bitmap? = null
         var outputUri: Uri? = null
-        var success = false
-        var fileName = "MiniVideoOverlay_${SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())}.mp4"
-        var inputPfd: ParcelFileDescriptor? = null
-        var decoderSurface: Surface? = null
-        var surfaceTexture: SurfaceTexture? = null
-        var compositor: GlCompositor? = null
-        var encoderSurface: Surface? = null
-        val extractor = MediaExtractor()
+        var published = false
+        val fileName = "MiniVideoOverlay_${SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())}.mp4"
         try {
-            overlay = decodeCanvasOverlay(pngUri)
             checkCancelled()
-            state = ExportState.Preparing
-            onProgress(1, "Memvalidasi video dan menyiapkan encoder…")
-            inputPfd = resolver.openFileDescriptor(videoUri, "r") ?: throw ExportException("Video tidak dapat dibuka.")
-            extractor.setDataSource(inputPfd.fileDescriptor)
-            val videoIndex = findTrack(extractor, "video/") ?: throw ExportException("File yang dipilih tidak memiliki track video.")
-            extractor.selectTrack(videoIndex)
-            val sourceFormat = extractor.getTrackFormat(videoIndex)
-            val sourceMime = sourceFormat.getString(MediaFormat.KEY_MIME) ?: throw ExportException("Codec video sumber tidak dikenali.")
-            val durationUs = if (sourceFormat.containsKey(MediaFormat.KEY_DURATION)) sourceFormat.getLong(MediaFormat.KEY_DURATION) else 0L
-            if (durationUs <= 0L) throw ExportException("Durasi video tidak tersedia atau metadata rusak.")
-            // Read playlist labels/timing before rendering so notifications are composited into every frame.
-            val musicCues = AudioPipeline(appContext) { cancelled }.inspectMusicPlaylist(musicUris, durationUs)
-            val sourceW = sourceFormat.getInteger(MediaFormat.KEY_WIDTH)
-            val sourceH = sourceFormat.getInteger(MediaFormat.KEY_HEIGHT)
-            val rotation = if (sourceFormat.containsKey(ROTATION_KEY)) sourceFormat.getInteger(ROTATION_KEY) else 0
-            val normalizedRotation = ((rotation % 360) + 360) % 360
-            val swapped = normalizedRotation == 90 || normalizedRotation == 270
-            val displayW = if (swapped) sourceH else sourceW
-            val displayH = if (swapped) sourceW else sourceH
-            val renderedHeightRatio = (OverlayConfig.OUTPUT_WIDTH.toFloat() / displayW.toFloat() * displayH.toFloat()) / OverlayConfig.OUTPUT_HEIGHT.toFloat()
-            val sourceFps = runCatching { sourceFormat.getInteger(MediaFormat.KEY_FRAME_RATE) }.getOrNull()
-                ?.takeIf { it > 0 }?.coerceAtMost(OverlayConfig.MAX_FRAME_RATE) ?: OverlayConfig.DEFAULT_FRAME_RATE
-            val fps = chooseSupportedFrameRate(sourceFps)
+            onProgress(1, "Memvalidasi sumber media…")
+            overlayBitmap = decodeFullCanvasPng(pngUri)
+            val hasVideoAudio = videoVolume > 0 && hasAudioTrack(videoUri)
+            // Preserve the exact playlist order, including repeated selections of the same URI.
+            val normalizedMusic = musicUris.toList()
+            val cues = if (normalizedMusic.isNotEmpty()) {
+                MusicMetadataReader(appContext).read(normalizedMusic)
+            } else emptyList()
+            checkCancelled()
 
-            onProgress(3, if (fps == sourceFps) "Menyiapkan komposisi visual 1920×1080…" else "Encoder tidak mendukung ${sourceFps} FPS; fallback terdokumentasi ke ${fps} FPS…")
-            val encoder = createVideoEncoder(fps)
-            videoEncoder = encoder
-            encoderSurface = encoder.createInputSurface()
-            encoder.start()
-            videoTemp.delete()
-            videoMuxer = MediaMuxer(videoTemp.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            compositor = GlCompositor(encoderSurface!!, overlay!!, renderedHeightRatio, normalizedRotation)
-            overlay.recycle(); overlay = null
-            val texture = SurfaceTexture(compositor.videoTextureId)
-            texture.setDefaultBufferSize(sourceW, sourceH)
-            surfaceTexture = texture
-            texture.setOnFrameAvailableListener { frameSignal.release() }
-            decoderSurface = Surface(texture)
+            state = ExportState.Preparing
+            onProgress(3, "Menyusun timeline Media3…")
+            val composition = buildComposition(
+                videoUri = videoUri,
+                overlayBitmap = overlayBitmap,
+                musicUris = if (musicVolume > 0) normalizedMusic else emptyList(),
+                cues = cues,
+                includeVideoAudio = hasVideoAudio,
+                videoGain = videoVolume.coerceIn(0, 100) / 100f,
+                musicGain = musicVolume.coerceIn(0, 100) / 100f
+            )
+            // Keep the PNG bitmap alive: Media3's BitmapOverlay reads it during the asynchronous export.
+            checkCancelled()
 
             state = ExportState.Exporting
-            onProgress(5, "Merender video dan PNG…")
-            renderVideo(extractor, sourceMime, sourceFormat, decoderSurface!!, texture, compositor!!, durationUs, musicCues) { pts ->
-                onProgress((5 + (pts * 72L / durationUs).toInt()).coerceIn(5, 77), "Merender frame video…")
-            }
-            encoder.signalEndOfInputStream()
-            drainVideoEncoder(true)
-            if (!videoMuxerStarted) throw ExportException("Encoder H.264 tidak menghasilkan video. Codec sumber mungkin tidak didukung.")
-            videoMuxer?.stop()
-            videoMuxerStarted = false
-
-            runCatching { decoderSurface?.release() }; decoderSurface = null
-            runCatching { surfaceTexture?.release() }; surfaceTexture = null
-            runCatching { compositor?.release() }; compositor = null
-            runCatching { encoderSurface?.release() }; encoderSurface = null
-            runCatching { encoder.stop() }; runCatching { encoder.release() }; videoEncoder = null
-            runCatching { videoMuxer?.release() }; videoMuxer = null
-            runCatching { extractor.release() }
-            runCatching { inputPfd?.close() }; inputPfd = null
-
+            onProgress(5, "Media3 sedang mengekspor video…")
+            val transformerOutput = createTransformerOutput(fileName)
+            val completedUri = runTransformer(composition, transformerOutput, fileName, resolveVideoBitrate(videoUri), onProgress)
+            outputUri = completedUri
             checkCancelled()
+
             state = ExportState.Finalizing
-            onProgress(79, "Memproses audio dan musik…")
-            val audio = AudioPipeline(appContext) { cancelled }.createMixedTrack(
-                videoUri, musicUris, durationUs, videoVolume / 100f, musicVolume / 100f
-            )
-            audioTemp = audio.file
-            val hasOutputAudio = audio.file != null
-            if (!hasOutputAudio) onProgress(92, "Tidak ada sumber audio; output akan berisi video tanpa track audio.")
-            checkCancelled()
-            onProgress(94, "Menggabungkan track MP4…")
-            fileName = "MiniVideoOverlay_${SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())}.mp4"
-            val createdOutputUri = insertPendingOutput(fileName)
-            outputUri = createdOutputUri
-            muxFinalTracks(videoTemp, audioTemp, createdOutputUri)
-            checkCancelled()
-            finalizePendingOutput(createdOutputUri)
-            success = true
+            onProgress(96, "Mempublikasikan hasil MP4…")
+            finalizePendingOutput(completedUri)
+            published = true
             state = ExportState.Completed
-            onProgress(100, if (hasOutputAudio) "Ekspor selesai." else "Ekspor selesai tanpa audio.")
-            return Result(createdOutputUri, fileName, hasOutputAudio)
+            onProgress(100, "Ekspor selesai.")
+            return Result(completedUri, fileName, hasVideoAudio || (normalizedMusic.isNotEmpty() && musicVolume > 0))
         } catch (e: ExportException) {
             state = if (cancelled || e.message?.contains("dibatalkan", ignoreCase = true) == true) ExportState.Cancelled else ExportState.Failed
             throw e
         } catch (t: Throwable) {
-            state = ExportState.Failed
-            throw ExportException("Ekspor gagal pada proses ${t.javaClass.simpleName}: ${t.message ?: "kesalahan tidak diketahui"}")
+            state = if (cancelled) ExportState.Cancelled else ExportState.Failed
+            if (cancelled) throw ExportException("Ekspor dibatalkan.", t)
+            throw ExportException("Ekspor Media3 gagal: ${t.message ?: t.javaClass.simpleName}", t)
         } finally {
-            runCatching { overlay?.recycle() }
-            runCatching { decoderSurface?.release() }
-            runCatching { surfaceTexture?.release() }
-            runCatching { compositor?.release() }
-            runCatching { encoderSurface?.release() }
-            runCatching { videoEncoder?.stop() }; runCatching { videoEncoder?.release() }
-            if (videoMuxerStarted) runCatching { videoMuxer?.stop() }
-            runCatching { videoMuxer?.release() }
-            runCatching { extractor.release() }; runCatching { inputPfd?.close() }
-            if (!success && outputUri != null) runCatching { resolver.delete(outputUri!!, null, null) }
-            videoTemp.delete(); audioTemp?.delete()
+            runCatching { overlayBitmap?.recycle() }
+            if (!published) {
+                val pending = outputUri ?: runCatching { findOutputUri(fileName) }.getOrNull()
+                if (pending != null) runCatching { appContext.contentResolver.delete(pending, null, null) }
+            }
+            transformer = null
+            transformerHandler = null
         }
     }
 
-    private fun chooseSupportedFrameRate(sourceFps: Int): Int {
-        val probe = try { MediaCodec.createEncoderByType(OverlayConfig.MIME_AVC) }
-        catch (t: Throwable) { throw ExportException("Encoder H.264 tidak tersedia: ${t.message}") }
-        try {
-            val caps = probe.codecInfo.getCapabilitiesForType(OverlayConfig.MIME_AVC).videoCapabilities
-            val candidates = listOf(sourceFps, min(sourceFps, 30), min(sourceFps, 24), min(sourceFps, 20), min(sourceFps, 15)).distinct()
-            return candidates.firstOrNull { it > 0 && caps.areSizeAndRateSupported(OverlayConfig.OUTPUT_WIDTH, OverlayConfig.OUTPUT_HEIGHT, it.toDouble()) }
-                ?: throw ExportException("Perangkat tidak mendukung encoder H.264 1920×1080 pada frame rate yang aman.")
-        } finally { runCatching { probe.release() } }
-    }
-
-    private fun createVideoEncoder(frameRate: Int): MediaCodec {
-        val codec = MediaCodec.createEncoderByType(OverlayConfig.MIME_AVC)
-        try {
-            val caps = codec.codecInfo.getCapabilitiesForType(OverlayConfig.MIME_AVC).videoCapabilities
-            if (!caps.areSizeAndRateSupported(OverlayConfig.OUTPUT_WIDTH, OverlayConfig.OUTPUT_HEIGHT, frameRate.toDouble())) {
-                throw ExportException("Encoder H.264 perangkat ini tidak mendukung 1920×1080 pada ${frameRate} FPS.")
-            }
-            val supportedBitrate = OverlayConfig.VIDEO_BITRATE.coerceIn(caps.bitrateRange.lower, caps.bitrateRange.upper)
-            val format = MediaFormat.createVideoFormat(OverlayConfig.MIME_AVC, OverlayConfig.OUTPUT_WIDTH, OverlayConfig.OUTPUT_HEIGHT).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, supportedBitrate)
-                setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-            }
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            return codec
-        } catch (t: Throwable) {
-            runCatching { codec.release() }
-            if (t is ExportException) throw t
-            throw ExportException("Encoder H.264 gagal dikonfigurasi: ${t.message}")
+    private fun buildComposition(
+        videoUri: Uri,
+        overlayBitmap: Bitmap,
+        musicUris: List<Uri>,
+        cues: List<MusicTrackCue>,
+        includeVideoAudio: Boolean,
+        videoGain: Float,
+        musicGain: Float
+    ): Composition {
+        val videoEffects = listOf(
+            Presentation.createForWidthAndHeight(
+                OverlayConfig.OUTPUT_WIDTH,
+                OverlayConfig.OUTPUT_HEIGHT,
+                Presentation.LAYOUT_SCALE_TO_FIT
+            ),
+            OverlayEffect(
+                listOf(
+                    BitmapOverlay.createStaticBitmapOverlay(overlayBitmap),
+                    MusicPopupOverlay(cues)
+                )
+            )
+        )
+        val videoAudioProcessors = if (includeVideoAudio) audioProcessors(videoGain) else emptyList()
+        val videoItem = EditedMediaItem.Builder(MediaItem.fromUri(videoUri))
+            .setRemoveAudio(!includeVideoAudio)
+            .setEffects(Effects(videoAudioProcessors, videoEffects))
+            .build()
+        val videoSequence = if (includeVideoAudio) {
+            EditedMediaItemSequence.withAudioAndVideoFrom(listOf(videoItem))
+        } else {
+            EditedMediaItemSequence.withVideoFrom(listOf(videoItem))
         }
+
+        val sequences = mutableListOf(videoSequence)
+        if (musicUris.isNotEmpty()) {
+            val musicItems = musicUris.map { uri ->
+                EditedMediaItem.Builder(MediaItem.fromUri(uri))
+                    .setRemoveVideo(true)
+                    .setEffects(Effects(audioProcessors(musicGain), emptyList()))
+                    .build()
+            }
+            val loopingMusic = EditedMediaItemSequence.withAudioFrom(musicItems)
+                .buildUpon()
+                .setIsLooping(true)
+                .build()
+            sequences += loopingMusic
+        }
+        return Composition.Builder(sequences).build()
     }
 
-    private fun notificationAt(ptsUs: Long, cues: List<MusicTrackCue>): MusicNotificationState? {
-        val valid = cues.filter { it.durationUs > 0L }
-        val cycleUs = valid.sumOf { it.durationUs }
-        if (cycleUs <= 0L) return null
-        val positionUs = ptsUs % cycleUs
-        val cue = valid.lastOrNull { it.startUs <= positionUs } ?: return null
-        val elapsedUs = positionUs - cue.startUs
-        if (elapsedUs >= MUSIC_NOTIFICATION_DURATION_US) return null
-        val fadeIn = (elapsedUs.toFloat() / MUSIC_NOTIFICATION_FADE_IN_US).coerceIn(0f, 1f)
-        val fadeOutStartUs = MUSIC_NOTIFICATION_DURATION_US - MUSIC_NOTIFICATION_FADE_OUT_US
-        val fadeOut = if (elapsedUs > fadeOutStartUs) {
-            ((MUSIC_NOTIFICATION_DURATION_US - elapsedUs).toFloat() / MUSIC_NOTIFICATION_FADE_OUT_US).coerceIn(0f, 1f)
-        } else 1f
-        return MusicNotificationState(cue, minOf(fadeIn, fadeOut))
+    private fun audioProcessors(gain: Float): List<AudioProcessor> {
+        val channelMixer = ChannelMixingAudioProcessor().apply {
+            for (channels in 1..6) {
+                putChannelMixingMatrix(ChannelMixingMatrix.createForConstantPower(channels, 2))
+            }
+        }
+        return listOf(
+            ToInt16PcmAudioProcessor(),
+            channelMixer,
+            GainProcessor(DefaultGainProvider.Builder(gain.coerceIn(0f, 1f)).build())
+        )
     }
 
-    private fun renderVideo(extractor: MediaExtractor, mime: String, format: MediaFormat,
-                            surface: Surface, texture: SurfaceTexture, compositor: GlCompositor,
-                            durationUs: Long, musicCues: List<MusicTrackCue>, progress: (Long) -> Unit) {
-        val decoder = try { MediaCodec.createDecoderByType(mime) }
-        catch (t: Throwable) { throw ExportException("Decoder video $mime tidak tersedia: ${t.message}") }
-        val matrix = FloatArray(16)
-        val info = MediaCodec.BufferInfo()
-        var inputDone = false
-        var outputDone = false
-        var firstPts = -1L
-        var lastPts = -1L
-        var frames = 0
-        try {
-            decoder.configure(format, surface, null, 0)
-            decoder.start()
-            extractor.seekTo(0L, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-            while (!outputDone) {
-                checkCancelled()
-                if (!inputDone) {
-                    val index = decoder.dequeueInputBuffer(OverlayConfig.CODEC_TIMEOUT_US)
-                    if (index >= 0) {
-                        val input = decoder.getInputBuffer(index) ?: throw ExportException("Buffer input decoder video tidak tersedia.")
-                        input.clear()
-                        val size = extractor.readSampleData(input, 0)
-                        if (size < 0) {
-                            decoder.queueInputBuffer(index, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            inputDone = true
-                        } else {
-                            decoder.queueInputBuffer(index, 0, size, extractor.sampleTime.coerceAtLeast(0L), extractor.sampleFlags)
-                            extractor.advance()
+    private fun runTransformer(
+        composition: Composition,
+        output: TransformerOutput,
+        outputFileName: String,
+        videoBitrate: Int,
+        onProgress: (Int, String) -> Unit
+    ): Uri {
+        val thread = HandlerThread("mvo-media3-transformer")
+        thread.start()
+        val handler = Handler(thread.looper)
+        transformerHandler = handler
+        val finished = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>(null)
+        val progressHolder = ProgressHolder()
+        val progressRunnable = object : Runnable {
+            override fun run() {
+                val active = transformer ?: return
+                if (cancelled) {
+                    runCatching { active.cancel() }
+                    return
+                }
+                val progressState = runCatching { active.getProgress(progressHolder) }.getOrDefault(Transformer.PROGRESS_STATE_UNAVAILABLE)
+                if (progressState == Transformer.PROGRESS_STATE_AVAILABLE) {
+                    val percent = (5 + progressHolder.progress * 0.86f).roundToInt().coerceIn(5, 91)
+                    onProgress(percent, "Media3 mengekspor video… ${progressHolder.progress}%")
+                }
+                if (finished.count > 0L) handler.postDelayed(this, 500L)
+            }
+        }
+
+        handler.post {
+            try {
+                val encoderSettings = VideoEncoderSettings.Builder()
+                    .setBitrate(videoBitrate)
+                    .setiFrameIntervalSeconds(2f)
+                    .build()
+                val encoderFactory = DefaultEncoderFactory.Builder(appContext)
+                    .setEnableFormatFallback(true)
+                    .setRequestedVideoEncoderSettings(encoderSettings)
+                    .build()
+                val built = Transformer.Builder(appContext)
+                    .setLooper(thread.looper)
+                    .setVideoMimeType(MimeTypes.VIDEO_H264)
+                    .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                    .setEncoderFactory(encoderFactory)
+                    .addListener(object : Transformer.Listener {
+                        override fun onCompleted(composition: Composition, exportResult: androidx.media3.transformer.ExportResult) {
+                            finished.countDown()
                         }
-                    }
-                }
-                when (val outIndex = decoder.dequeueOutputBuffer(info, OverlayConfig.CODEC_TIMEOUT_US)) {
-                    MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
-                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
-                    else -> if (outIndex >= 0) {
-                        val eos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-                        if (info.size > 0) {
-                            if (firstPts < 0L) firstPts = info.presentationTimeUs
-                            val pts = (info.presentationTimeUs - firstPts).coerceAtLeast(0L)
-                            if (pts < durationUs) {
-                                decoder.releaseOutputBuffer(outIndex, true)
-                                if (!frameSignal.tryAcquire(OverlayConfig.FRAME_TIMEOUT_MS, TimeUnit.MILLISECONDS)) throw ExportException("Timeout saat menunggu frame hasil decode.")
-                                texture.updateTexImage(); texture.getTransformMatrix(matrix)
-                                val safePts = max(pts, lastPts + 1L)
-                                val notification = notificationAt(pts, musicCues)
-                                compositor.updateMusicNotification(notification?.cue)
-                                compositor.drawFrame(matrix, safePts * 1000L, notification?.opacity ?: 0f)
-                                drainVideoEncoder(false)
-                                lastPts = safePts; frames++
-                                progress(pts)
-                            } else decoder.releaseOutputBuffer(outIndex, false)
-                        } else decoder.releaseOutputBuffer(outIndex, false)
-                        if (eos) outputDone = true
-                    }
-                }
-            }
-        } finally {
-            runCatching { decoder.stop() }; runCatching { decoder.release() }
-        }
-        if (frames == 0) throw ExportException("Tidak ada frame video yang berhasil didekode.")
-    }
 
-    private fun drainVideoEncoder(endOfStream: Boolean) {
-        val encoder = videoEncoder ?: return
-        val muxer = videoMuxer ?: return
-        var idle = 0
-        while (true) {
-            checkCancelled()
-            val index = encoder.dequeueOutputBuffer(encoderInfo, if (endOfStream) OverlayConfig.CODEC_TIMEOUT_US else 0L)
-            when {
-                index == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                    if (!endOfStream) return
-                    if (++idle > OverlayConfig.ENCODER_DRAIN_MAX_IDLE) throw ExportException("Encoder video berhenti merespons saat finalisasi.")
+                        override fun onError(
+                            composition: Composition,
+                            exportResult: androidx.media3.transformer.ExportResult,
+                            exportException: androidx.media3.transformer.ExportException
+                        ) {
+                            failure.set(exportException)
+                            finished.countDown()
+                        }
+                    })
+                    .build()
+                transformer = built
+                if (cancelled) {
+                    built.cancel()
+                    finished.countDown()
+                } else {
+                    built.start(composition, output)
+                    handler.post(progressRunnable)
                 }
-                index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                    if (videoMuxerStarted) throw ExportException("Format encoder video berubah setelah muxer dimulai.")
-                    videoTrack = muxer.addTrack(encoder.outputFormat); muxer.start(); videoMuxerStarted = true
-                }
-                index >= 0 -> {
-                    val buffer = encoder.getOutputBuffer(index) ?: throw ExportException("Buffer output encoder video tidak tersedia.")
-                    if ((encoderInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) encoderInfo.size = 0
-                    if (encoderInfo.size > 0) {
-                        if (!videoMuxerStarted) throw ExportException("Sample video diterima sebelum format muxer siap.")
-                        buffer.position(encoderInfo.offset); buffer.limit(encoderInfo.offset + encoderInfo.size)
-                        muxer.writeSampleData(videoTrack, buffer, encoderInfo)
-                    }
-                    val eos = (encoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-                    encoder.releaseOutputBuffer(index, false)
-                    if (eos) return
-                }
+            } catch (t: Throwable) {
+                failure.set(t)
+                finished.countDown()
             }
         }
-    }
 
-    private fun muxFinalTracks(videoFile: File, audioFile: File?, outputUri: Uri) {
-        val resolver = appContext.contentResolver
-        val out = resolver.openFileDescriptor(outputUri, "rw") ?: throw ExportException("File output tidak dapat dibuka.")
-        val video = MediaExtractor()
-        val audio = if (audioFile != null) MediaExtractor() else null
-        var muxer: MediaMuxer? = null
-        var started = false
         try {
-            video.setDataSource(videoFile.absolutePath)
-            val vi = findTrack(video, "video/") ?: throw ExportException("Track video sementara tidak ditemukan.")
-            video.selectTrack(vi)
-            var ai = -1
-            if (audio != null) {
-                audio.setDataSource(audioFile!!.absolutePath)
-                ai = findTrack(audio, "audio/") ?: throw ExportException("Track AAC hasil mixing tidak ditemukan.")
-                audio.selectTrack(ai)
+            while (!finished.await(500, TimeUnit.MILLISECONDS)) {
+                if (cancelled) handler.post { runCatching { transformer?.cancel() } }
             }
-            muxer = MediaMuxer(out.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            val outVideoTrack = muxer.addTrack(video.getTrackFormat(vi))
-            val outAudioTrack = if (audio != null) muxer.addTrack(audio.getTrackFormat(ai)) else -1
-            muxer.start(); started = true
-            copyTrack(video, muxer, outVideoTrack, vi)
-            if (audio != null) copyTrack(audio, muxer, outAudioTrack, ai)
-            muxer.stop(); started = false
-        } catch (t: Throwable) {
-            if (t is ExportException) throw t
-            throw ExportException("Gagal menggabungkan audio/video ke MP4: ${t.message}")
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            handler.post { runCatching { transformer?.cancel() } }
+            throw ExportException("Ekspor dibatalkan.", interrupted)
         } finally {
-            if (started) runCatching { muxer?.stop() }
-            runCatching { muxer?.release() }; runCatching { video.release() }; runCatching { audio?.release() }; runCatching { out.close() }
+            handler.removeCallbacks(progressRunnable)
+            handler.post { transformer = null }
+            thread.quitSafely()
+            thread.join(2_000L)
         }
+        if (cancelled) throw ExportException("Ekspor dibatalkan.")
+        failure.get()?.let { throw ExportException("Media3 tidak dapat menyelesaikan ekspor: ${it.message}", it) }
+        return findOutputUri(outputFileName)
+            ?: throw ExportException("Media3 menyelesaikan ekspor tetapi file tidak ditemukan di MediaStore.")
     }
 
-    private fun copyTrack(extractor: MediaExtractor, muxer: MediaMuxer, outputTrack: Int, sourceTrack: Int) {
-        val maxSize = (extractor.getTrackFormat(sourceTrack).let {
-            if (it.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) it.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) else 1 shl 20
-        }).coerceAtLeast(64 * 1024)
-        val buffer = java.nio.ByteBuffer.allocateDirect(maxSize)
-        val info = MediaCodec.BufferInfo()
-        while (true) {
-            checkCancelled()
-            val size = extractor.readSampleData(buffer, 0)
-            if (size < 0) break
-            if (size == 0) { extractor.advance(); continue }
-            info.set(0, size, extractor.sampleTime.coerceAtLeast(0L), extractor.sampleFlags)
-            buffer.position(0); buffer.limit(size)
-            muxer.writeSampleData(outputTrack, buffer, info)
-            extractor.advance()
+    private fun decodeFullCanvasPng(uri: Uri): Bitmap {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        appContext.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            ?: throw ExportException("File PNG tidak dapat dibuka.")
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw ExportException("PNG tidak valid atau tidak dapat didekode.")
+        if (bounds.outWidth > 12_000 || bounds.outHeight > 12_000) {
+            throw ExportException("Dimensi PNG terlalu besar; maksimum 12000×12000.")
         }
-    }
-
-    private fun decodeCanvasOverlay(uri: Uri): Bitmap {
-        val signature = appContext.contentResolver.openInputStream(uri)?.use { input ->
-            val bytes = ByteArray(8); var read = 0
-            while (read < bytes.size) { val count = input.read(bytes, read, bytes.size - read); if (count < 0) break; read += count }
-            if (read != bytes.size) throw ExportException("File PNG terlalu pendek atau rusak.")
-            bytes
-        } ?: throw ExportException("File PNG tidak dapat dibuka.")
-        val pngSignature = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
-        if (!signature.contentEquals(pngSignature)) throw ExportException("File yang dipilih bukan PNG asli. Pilih file PNG.")
-        val decoded = try {
-            val source = ImageDecoder.createSource(appContext.contentResolver, uri)
-            ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-                val w = info.size.width.coerceAtLeast(1)
-                val h = info.size.height.coerceAtLeast(1)
-                if (w > 12000 || h > 12000) throw ExportException("Dimensi PNG terlalu besar; maksimum 12000×12000.")
-                val scale = min(OverlayConfig.OUTPUT_WIDTH.toFloat() / w, OverlayConfig.OUTPUT_HEIGHT.toFloat() / h)
-                decoder.setTargetSize((w * scale).toInt().coerceAtLeast(1), (h * scale).toInt().coerceAtLeast(1))
-                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-            }
-        } catch (e: ExportException) { throw e }
-          catch (t: Throwable) { throw ExportException("PNG tidak dapat dibaca: ${t.message}") }
+        var sampleSize = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > 3_840) sampleSize *= 2
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val decoded = appContext.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+            ?: throw ExportException("PNG tidak valid atau tidak dapat didekode.")
         if (!decoded.hasAlpha()) {
             decoded.recycle()
-            throw ExportException("PNG yang dipilih tidak memiliki kanal alpha/transparansi. Pilih PNG transparan.")
+            throw ExportException("PNG yang dipilih tidak memiliki transparansi alpha.")
         }
         val canvasBitmap = Bitmap.createBitmap(OverlayConfig.OUTPUT_WIDTH, OverlayConfig.OUTPUT_HEIGHT, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(canvasBitmap)
         canvas.drawColor(Color.TRANSPARENT)
-        val scale = min(OverlayConfig.OUTPUT_WIDTH.toFloat() / decoded.width, OverlayConfig.OUTPUT_HEIGHT.toFloat() / decoded.height)
-        val w = decoded.width * scale; val h = decoded.height * scale
-        val dst = RectF((OverlayConfig.OUTPUT_WIDTH - w) / 2f, (OverlayConfig.OUTPUT_HEIGHT - h) / 2f,
-            (OverlayConfig.OUTPUT_WIDTH + w) / 2f, (OverlayConfig.OUTPUT_HEIGHT + h) / 2f)
-        canvas.drawBitmap(decoded, null, dst, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+        val scale = min(
+            OverlayConfig.OUTPUT_WIDTH.toFloat() / decoded.width,
+            OverlayConfig.OUTPUT_HEIGHT.toFloat() / decoded.height
+        )
+        val width = decoded.width * scale
+        val height = decoded.height * scale
+        val destination = RectF(
+            (OverlayConfig.OUTPUT_WIDTH - width) / 2f,
+            (OverlayConfig.OUTPUT_HEIGHT - height) / 2f,
+            (OverlayConfig.OUTPUT_WIDTH + width) / 2f,
+            (OverlayConfig.OUTPUT_HEIGHT + height) / 2f
+        )
+        canvas.drawBitmap(decoded, null, destination, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
         decoded.recycle()
         return canvasBitmap
     }
 
-    private fun insertPendingOutput(name: String): Uri {
+
+    private fun resolveVideoBitrate(uri: Uri): Int {
+        val extractor = android.media.MediaExtractor()
+        var descriptor: ParcelFileDescriptor? = null
+        return try {
+            descriptor = appContext.contentResolver.openFileDescriptor(uri, "r") ?: return OverlayConfig.VIDEO_BITRATE
+            extractor.setDataSource(descriptor.fileDescriptor)
+            val frameRate = (0 until extractor.trackCount).firstNotNullOfOrNull { index ->
+                val format = extractor.getTrackFormat(index)
+                val mime = format.getString(android.media.MediaFormat.KEY_MIME).orEmpty()
+                if (mime.startsWith("video/") && format.containsKey(android.media.MediaFormat.KEY_FRAME_RATE)) {
+                    format.getInteger(android.media.MediaFormat.KEY_FRAME_RATE)
+                } else null
+            } ?: 30
+            if (frameRate >= 50) OverlayConfig.VIDEO_BITRATE_60FPS else OverlayConfig.VIDEO_BITRATE
+        } catch (_: Throwable) {
+            OverlayConfig.VIDEO_BITRATE
+        } finally {
+            runCatching { extractor.release() }
+            runCatching { descriptor?.close() }
+        }
+    }
+
+    private fun hasAudioTrack(uri: Uri): Boolean {
+        val extractor = android.media.MediaExtractor()
+        var descriptor: ParcelFileDescriptor? = null
+        return try {
+            descriptor = appContext.contentResolver.openFileDescriptor(uri, "r") ?: return false
+            extractor.setDataSource(descriptor.fileDescriptor)
+            (0 until extractor.trackCount).any { index ->
+                extractor.getTrackFormat(index).getString(android.media.MediaFormat.KEY_MIME).orEmpty().startsWith("audio/")
+            }
+        } catch (_: Throwable) {
+            false
+        } finally {
+            runCatching { extractor.release() }
+            runCatching { descriptor?.close() }
+        }
+    }
+
+    private fun createTransformerOutput(name: String): TransformerOutput {
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, name)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
             put(MediaStore.Video.Media.RELATIVE_PATH, OverlayConfig.OUTPUT_FOLDER)
             put(MediaStore.Video.Media.IS_PENDING, 1)
         }
-        return appContext.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-            ?: throw ExportException("Penyimpanan gagal dibuat. Periksa ruang kosong perangkat.")
+        return TransformerOutput.create(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
     }
 
-    private fun finalizePendingOutput(uri: Uri) {
-        val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
-        if (appContext.contentResolver.update(uri, values, null, null) <= 0) throw ExportException("File selesai ditulis tetapi gagal dipublikasikan di MediaStore.")
-    }
-
-    private fun findTrack(extractor: MediaExtractor, prefix: String): Int? {
-        for (i in 0 until extractor.trackCount) {
-            val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
-            if (mime.startsWith(prefix)) return i
+    private fun findOutputUri(name: String): Uri? {
+        val projection = arrayOf(MediaStore.Video.Media._ID)
+        appContext.contentResolver.query(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            "${MediaStore.Video.Media.DISPLAY_NAME} = ?",
+            arrayOf(name),
+            "${MediaStore.Video.Media.DATE_ADDED} DESC"
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                return ContentUris.withAppendedId(
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                    cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID))
+                )
+            }
         }
         return null
     }
 
-    private fun checkCancelled() { if (cancelled) throw ExportException("Ekspor dibatalkan oleh pengguna.") }
+    private fun finalizePendingOutput(uri: Uri) {
+        val values = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+        if (appContext.contentResolver.update(uri, values, null, null) <= 0) {
+            throw ExportException("File selesai dibuat tetapi gagal dipublikasikan di MediaStore.")
+        }
+    }
+
+    private fun checkCancelled() {
+        if (cancelled) throw ExportException("Ekspor dibatalkan.")
+    }
+}
+
+private data class MusicTrackCue(val title: String, val artist: String, val startUs: Long, val durationUs: Long)
+
+private class MusicMetadataReader(private val context: Context) {
+    fun read(uris: List<Uri>): List<MusicTrackCue> {
+        var cursor = 0L
+        val result = mutableListOf<MusicTrackCue>()
+        uris.forEach { uri ->
+            val retriever = android.media.MediaMetadataRetriever()
+            var title: String? = null
+            var artist: String? = null
+            var durationUs = 0L
+            try {
+                retriever.setDataSource(context, uri)
+                title = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE)
+                artist = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ARTIST)
+                durationUs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull()?.coerceAtLeast(0L)?.times(1_000L) ?: 0L
+            } catch (_: Throwable) {
+                // MediaExtractor below is used as a metadata-only duration fallback.
+            } finally {
+                runCatching { retriever.release() }
+            }
+            if (durationUs <= 0L) durationUs = readDurationUs(uri)
+            if (durationUs > 0L) {
+                val fallback = displayName(uri).substringBeforeLast('.').ifBlank { "Music" }
+                result += MusicTrackCue(
+                    title?.takeIf { it.isNotBlank() } ?: fallback,
+                    artist?.takeIf { it.isNotBlank() } ?: "Unknown artist",
+                    cursor,
+                    durationUs
+                )
+                cursor += durationUs
+            }
+        }
+        return result
+    }
+
+    private fun readDurationUs(uri: Uri): Long {
+        val extractor = android.media.MediaExtractor()
+        var descriptor: ParcelFileDescriptor? = null
+        return try {
+            descriptor = context.contentResolver.openFileDescriptor(uri, "r") ?: return 0L
+            extractor.setDataSource(descriptor.fileDescriptor)
+            (0 until extractor.trackCount).firstNotNullOfOrNull { index ->
+                val format = extractor.getTrackFormat(index)
+                val mime = format.getString(android.media.MediaFormat.KEY_MIME).orEmpty()
+                if (mime.startsWith("audio/") && format.containsKey(android.media.MediaFormat.KEY_DURATION)) {
+                    format.getLong(android.media.MediaFormat.KEY_DURATION).coerceAtLeast(0L)
+                } else null
+            } ?: 0L
+        } catch (_: Throwable) {
+            0L
+        } finally {
+            runCatching { extractor.release() }
+            runCatching { descriptor?.close() }
+        }
+    }
+
+    private fun displayName(uri: Uri): String = runCatching {
+        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0).orEmpty() else ""
+        }.orEmpty()
+    }.getOrDefault("")
+}
+
+@OptIn(UnstableApi::class)
+private class MusicPopupOverlay(cues: List<MusicTrackCue>) : BitmapOverlay() {
+    private val trackCues = cues
+    private val totalPlaylistUs = cues.sumOf { it.durationUs }
+    private val transparent = Bitmap.createBitmap(CARD_WIDTH, CARD_HEIGHT, Bitmap.Config.ARGB_8888)
+    private val bitmapCache = HashMap<Int, Bitmap>()
+    private val alphaSettings = Array(65) { index ->
+        StaticOverlaySettings.Builder()
+            .setAlphaScale(index / 64f)
+            .setScale(1f, 1f)
+            .setBackgroundFrameAnchor(-0.95f, 0.90f)
+            .setOverlayFrameAnchor(-1f, 1f)
+            .build()
+    }
+
+    override fun getBitmap(presentationTimeUs: Long): Bitmap {
+        val active = activeCue(presentationTimeUs) ?: return transparent
+        return bitmapCache.getOrPut(active.first) { drawCard(active.second) }
+    }
+
+    override fun getOverlaySettings(presentationTimeUs: Long): androidx.media3.common.OverlaySettings {
+        val active = activeCue(presentationTimeUs) ?: return alphaSettings[0]
+        val elapsed = (presentationTimeUs % totalPlaylistUs) - active.second.startUs
+        val fadeIn = (elapsed / FADE_IN_US.toFloat()).coerceIn(0f, 1f)
+        val fadeOut = ((DISPLAY_US - elapsed) / FADE_OUT_US.toFloat()).coerceIn(0f, 1f)
+        val alpha = min(fadeIn, fadeOut)
+        return alphaSettings[(alpha * 64f).roundToInt().coerceIn(0, 64)]
+    }
+
+    private fun activeCue(timeUs: Long): Pair<Int, MusicTrackCue>? {
+        if (trackCues.isEmpty() || totalPlaylistUs <= 0L) return null
+        val cycleTime = timeUs.coerceAtLeast(0L) % totalPlaylistUs
+        val index = trackCues.indexOfLast { it.startUs <= cycleTime }
+        if (index < 0) return null
+        val cue = trackCues[index]
+        val elapsed = cycleTime - cue.startUs
+        return if (elapsed in 0 until min(DISPLAY_US, cue.durationUs)) index to cue else null
+    }
+
+    private fun drawCard(cue: MusicTrackCue): Bitmap {
+        val bitmap = Bitmap.createBitmap(CARD_WIDTH, CARD_HEIGHT, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val background = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(218, 10, 17, 27) }
+        val accent = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(82, 197, 255) }
+        val icon = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(105, 207, 255); textSize = 54f; typeface = Typeface.create("sans-serif", Typeface.BOLD)
+        }
+        val title = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE; textSize = 32f; typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        }
+        val artist = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(190, 205, 220); textSize = 24f; typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+        }
+        canvas.drawRoundRect(RectF(0f, 0f, CARD_WIDTH.toFloat(), CARD_HEIGHT.toFloat()), 18f, 18f, background)
+        canvas.drawRoundRect(RectF(0f, 0f, 9f, CARD_HEIGHT.toFloat()), 5f, 5f, accent)
+        canvas.drawText("♫", 32f, 105f, icon)
+        canvas.drawText(ellipsize(cue.title, title, 480f), 108f, 78f, title)
+        canvas.drawText(ellipsize(cue.artist.ifBlank { "NOW PLAYING" }, artist, 480f), 108f, 119f, artist)
+        return bitmap
+    }
+
+    private fun ellipsize(value: String, paint: Paint, maxWidth: Float): String {
+        if (paint.measureText(value) <= maxWidth) return value
+        var end = value.length
+        while (end > 0 && paint.measureText(value.substring(0, end) + "…") > maxWidth) end--
+        return value.substring(0, end).trimEnd() + "…"
+    }
+
+    override fun release() {
+        bitmapCache.values.forEach { if (!it.isRecycled) it.recycle() }
+        bitmapCache.clear()
+        if (!transparent.isRecycled) transparent.recycle()
+        super.release()
+    }
 
     companion object {
-        private const val ROTATION_KEY = "rotation-degrees"
-        private const val MUSIC_NOTIFICATION_DURATION_US = 3_000_000L
-        private const val MUSIC_NOTIFICATION_FADE_IN_US = 250_000L
-        private const val MUSIC_NOTIFICATION_FADE_OUT_US = 350_000L
+        private const val CARD_WIDTH = 640
+        private const val CARD_HEIGHT = 150
+        private const val DISPLAY_US = 3_000_000L
+        private const val FADE_IN_US = 250_000L
+        private const val FADE_OUT_US = 350_000L
     }
 }
