@@ -1,7 +1,6 @@
 package com.personal.minivideooverlay
 
 import android.content.ContentValues
-import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -34,9 +33,9 @@ import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
-import androidx.media3.transformer.TransformerOutput
 import androidx.media3.transformer.VideoEncoderSettings
 import androidx.media3.transformer.DefaultEncoderFactory
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -75,6 +74,7 @@ class ExportEngine(private val appContext: Context) {
         state = ExportState.Validating
         var overlayBitmap: Bitmap? = null
         var outputUri: Uri? = null
+        var tempOutputFile: File? = null
         var published = false
         val fileName = "MiniVideoOverlay_${SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())}.mp4"
         try {
@@ -105,14 +105,27 @@ class ExportEngine(private val appContext: Context) {
 
             state = ExportState.Exporting
             onProgress(5, "Media3 sedang mengekspor video…")
-            val transformerOutput = createTransformerOutput(fileName)
-            val completedUri = runTransformer(composition, transformerOutput, fileName, resolveVideoBitrate(videoUri), onProgress)
-            outputUri = completedUri
+            val tempFile = File(appContext.cacheDir, "mvo_export_${System.nanoTime()}.mp4")
+            tempOutputFile = tempFile
+            if (tempFile.exists()) tempFile.delete()
+            val renderedFile = runTransformer(composition, tempFile, resolveVideoBitrate(videoUri), onProgress)
             checkCancelled()
 
             state = ExportState.Finalizing
-            onProgress(96, "Mempublikasikan hasil MP4…")
-            finalizePendingOutput(completedUri)
+            onProgress(96, "Menyimpan hasil MP4…")
+            val pendingUri = createPendingOutput(fileName)
+            outputUri = pendingUri
+            try {
+                appContext.contentResolver.openOutputStream(pendingUri, "w")?.use { destination ->
+                    renderedFile.inputStream().use { source -> source.copyTo(destination) }
+                } ?: throw ExportException("Tidak dapat membuka file tujuan di MediaStore.")
+                checkCancelled()
+                finalizePendingOutput(pendingUri)
+            } catch (t: Throwable) {
+                runCatching { appContext.contentResolver.delete(pendingUri, null, null) }
+                outputUri = null
+                throw t
+            }
             published = true
             state = ExportState.Completed
             onProgress(100, "Ekspor selesai.")
@@ -126,7 +139,8 @@ class ExportEngine(private val appContext: Context) {
             throw ExportException("Ekspor Media3 gagal: ${t.message ?: t.javaClass.simpleName}", t)
         } finally {
             runCatching { overlayBitmap?.recycle() }
-            if (!published) {
+            runCatching { tempOutputFile?.delete() }
+            if (!published) { {
                 outputUri?.let { pending -> runCatching { appContext.contentResolver.delete(pending, null, null) } }
             }
             transformer = null
@@ -199,11 +213,10 @@ class ExportEngine(private val appContext: Context) {
 
     private fun runTransformer(
         composition: Composition,
-        output: TransformerOutput,
-        outputFileName: String,
+        outputFile: File,
         videoBitrate: Int,
         onProgress: (Int, String) -> Unit
-    ): Uri {
+    ): File {
         val thread = HandlerThread("mvo-media3-transformer")
         thread.start()
         val handler = Handler(thread.looper)
@@ -262,7 +275,7 @@ class ExportEngine(private val appContext: Context) {
                     built.cancel()
                     finished.countDown()
                 } else {
-                    built.start(composition, output)
+                    built.start(composition, outputFile.absolutePath)
                     handler.post(progressRunnable)
                 }
             } catch (t: Throwable) {
@@ -287,8 +300,10 @@ class ExportEngine(private val appContext: Context) {
         }
         if (cancelled) throw ExportException("Ekspor dibatalkan.")
         failure.get()?.let { throw ExportException("Media3 tidak dapat menyelesaikan ekspor: ${it.message}", it) }
-        return findOutputUri(outputFileName)
-            ?: throw ExportException("Media3 menyelesaikan ekspor tetapi file tidak ditemukan di MediaStore.")
+        if (!outputFile.exists() || outputFile.length() <= 0L) {
+            throw ExportException("Media3 selesai tetapi file hasil ekspor kosong atau tidak ditemukan.")
+        }
+        return outputFile
     }
 
     private fun decodeFullCanvasPng(uri: Uri): Bitmap {
@@ -371,33 +386,15 @@ class ExportEngine(private val appContext: Context) {
         }
     }
 
-    private fun createTransformerOutput(name: String): TransformerOutput {
+    private fun createPendingOutput(name: String): Uri {
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, name)
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
             put(MediaStore.Video.Media.RELATIVE_PATH, OverlayConfig.OUTPUT_FOLDER)
             put(MediaStore.Video.Media.IS_PENDING, 1)
         }
-        return TransformerOutput.create(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-    }
-
-    private fun findOutputUri(name: String): Uri? {
-        val projection = arrayOf(MediaStore.Video.Media._ID)
-        appContext.contentResolver.query(
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-            projection,
-            "${MediaStore.Video.Media.DISPLAY_NAME} = ?",
-            arrayOf(name),
-            "${MediaStore.Video.Media.DATE_ADDED} DESC"
-        )?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                return ContentUris.withAppendedId(
-                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                    cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID))
-                )
-            }
-        }
-        return null
+        return appContext.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            ?: throw ExportException("Tidak dapat membuat file tujuan di MediaStore.")
     }
 
     private fun finalizePendingOutput(uri: Uri) {
