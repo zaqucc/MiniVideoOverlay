@@ -140,7 +140,7 @@ class ExportEngine(private val appContext: Context) {
         } finally {
             runCatching { overlayBitmap?.recycle() }
             runCatching { tempOutputFile?.delete() }
-            if (!published) { {
+            if (!published) {
                 outputUri?.let { pending -> runCatching { appContext.contentResolver.delete(pending, null, null) } }
             }
             transformer = null
