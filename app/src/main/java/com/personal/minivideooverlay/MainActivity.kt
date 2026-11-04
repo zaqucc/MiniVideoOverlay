@@ -67,6 +67,7 @@ class MainActivity : Activity() {
     private lateinit var videoLabel: TextView
     private lateinit var pngLabel: TextView
     private lateinit var musicLabel: TextView
+    private lateinit var musicListContainer: LinearLayout
     private lateinit var videoVolumeLabel: TextView
     private lateinit var musicVolumeLabel: TextView
     private lateinit var statusText: TextView
@@ -262,6 +263,8 @@ class MainActivity : Activity() {
         chooseMusicButton = Button(this).apply { text = "Tambah Musik ke Playlist (Bisa Banyak)"; setOnClickListener { pickMusicFiles() } }
         root.addView(chooseMusicButton, margin(dp(8)))
         musicLabel = label(); root.addView(musicLabel, margin(dp(2)))
+        musicListContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(musicListContainer, margin(dp(6)))
 
         root.addView(section("PENGATURAN AUDIO", dp(18)))
         videoVolumeLabel = label(); root.addView(videoVolumeLabel)
@@ -492,6 +495,50 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun renderMusicPlaylist(busy: Boolean) {
+        if (!::musicListContainer.isInitialized) return
+        musicListContainer.removeAllViews()
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density).toInt()
+        musicUris.forEachIndexed { index, uri ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(dp(10), dp(5), dp(6), dp(5))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(Color.rgb(20, 31, 48))
+                    cornerRadius = dp(10).toFloat()
+                }
+            }
+            val track = TextView(this).apply {
+                text = "%02d  %s\\n%s".format(index + 1, displayName(uri), mediaDuration(uri))
+                textSize = 12f
+                setTextColor(Color.rgb(204, 215, 228))
+                maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(dp(4), dp(4), dp(8), dp(4))
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            }
+            val remove = Button(this).apply {
+                text = "Hapus"
+                isEnabled = !busy
+                textSize = 11f
+                setOnClickListener {
+                    if (!ExportServiceState.isRunning && index in musicUris.indices) {
+                        musicUris.removeAt(index)
+                        refreshUi()
+                    }
+                }
+            }
+            row.addView(track)
+            row.addView(remove, LinearLayout.LayoutParams(dp(72), dp(42)))
+            applyProfessionalTheme(row)
+            musicListContainer.addView(row, LinearLayout.LayoutParams(-1, -2).apply {
+                bottomMargin = dp(6)
+            })
+        }
+    }
+
     private fun updateVolumeLabels() {
         videoVolumeLabel.text = "Volume video asli: $videoVolume%"
         musicVolumeLabel.text = "Volume musik tambahan: $musicVolume%"
@@ -501,7 +548,8 @@ class MainActivity : Activity() {
         val busy = ExportServiceState.isRunning
         videoLabel.text = "Video: ${videoUri?.let { displayName(it) + " • " + mediaDuration(it) } ?: "Belum dipilih"}"
         pngLabel.text = "PNG: ${pngUri?.let { displayName(it) } ?: "Belum dipilih"}"
-        musicLabel.text = if (musicUris.isEmpty()) "Playlist: belum ada musik (opsional)" else "Playlist (${musicUris.size} lagu):\n" + musicUris.mapIndexed { i, uri -> "${i + 1}. ${displayName(uri)} • ${mediaDuration(uri)}" }.joinToString("\n") + "\n\nPemutaran berurutan dan diulang sampai video selesai."
+        musicLabel.text = if (musicUris.isEmpty()) "Playlist: belum ada musik (opsional)" else "Playlist (${musicUris.size} lagu) · diputar berurutan dan diulang sampai video selesai."
+        renderMusicPlaylist(busy)
         updateVolumeLabels()
         chooseVideoButton.isEnabled = !busy
         choosePngButton.isEnabled = !busy
