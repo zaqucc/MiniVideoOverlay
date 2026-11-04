@@ -399,7 +399,7 @@ class MainActivity : Activity() {
         exportButton.isEnabled = !busy && videoUri != null && pngUri != null
         cancelButton.visibility = if (busy) View.VISIBLE else View.GONE
         previewButton.isEnabled = !busy
-        if (!busy && progress.progress < 100) progress.visibility = View.GONE
+        progress.visibility = if (busy) View.VISIBLE else View.GONE
     }
 
     private fun displayName(uri: Uri): String = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
