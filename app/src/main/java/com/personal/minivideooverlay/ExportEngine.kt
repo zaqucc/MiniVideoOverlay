@@ -116,7 +116,7 @@ class ExportEngine(private val appContext: Context) {
             published = true
             state = ExportState.Completed
             onProgress(100, "Ekspor selesai.")
-            return Result(completedUri, fileName, hasVideoAudio || (normalizedMusic.isNotEmpty() && musicVolume > 0))
+            return Result(pendingUri, fileName, hasVideoAudio || (normalizedMusic.isNotEmpty() && musicVolume > 0))
         } catch (e: ExportException) {
             state = if (cancelled || e.message?.contains("dibatalkan", ignoreCase = true) == true) ExportState.Cancelled else ExportState.Failed
             throw e
@@ -127,8 +127,7 @@ class ExportEngine(private val appContext: Context) {
         } finally {
             runCatching { overlayBitmap?.recycle() }
             if (!published) {
-                val pending = outputUri ?: runCatching { findOutputUri(fileName) }.getOrNull()
-                if (pending != null) runCatching { appContext.contentResolver.delete(pending, null, null) }
+                outputUri?.let { pending -> runCatching { appContext.contentResolver.delete(pending, null, null) } }
             }
             transformer = null
             transformerHandler = null
