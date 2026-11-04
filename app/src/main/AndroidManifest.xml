@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- No permissions: files are accessed through the Storage Access Framework
          (ACTION_OPEN_DOCUMENT) and saved through MediaStore. -->
@@ -13,6 +17,11 @@
         android:label="MiniVideoOverlay"
         android:supportsRtl="false"
         android:theme="@android:style/Theme.DeviceDefault.Light.DarkActionBar">
+
+        <service
+            android:name=".ExportService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync|mediaProcessing" />
 
         <activity
             android:name=".MainActivity"
