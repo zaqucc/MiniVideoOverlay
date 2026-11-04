@@ -79,7 +79,9 @@ class ExportService : Service() {
                         sendBroadcast(Intent(ACTION_STATE_CHANGED).setPackage(packageName))
                         engine = null
                         worker = null
-                        stopForeground(STOP_FOREGROUND_DETACH)
+                        // Ekspor sudah berakhir: hapus notifikasi foreground agar ikon upload tidak tertinggal.
+                        notifications.cancel(NOTIFICATION_ID)
+                        stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     }
                 }, "mvo-foreground-export")
