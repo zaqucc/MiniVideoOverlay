@@ -164,7 +164,7 @@ class GlCompositor(
             -1f, 1f, 0f, 1f, 1f, 1f, 1f, 1f
         )
         private const val VERTEX = "attribute vec4 aPosition; attribute vec2 aTexCoord; varying vec2 vTex; void main(){gl_Position=aPosition;vTex=aTexCoord;}"
-        private const val VIDEO_FRAGMENT = """
+        private val VIDEO_FRAGMENT = """
             #extension GL_OES_EGL_image_external : require
             precision mediump float;
             uniform samplerExternalOES sTexture;
