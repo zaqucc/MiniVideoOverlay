@@ -102,6 +102,11 @@ class MainActivity : Activity() {
     private var thumbnailLoadToken = 0
     private lateinit var trimStartLabel: TextView
     private lateinit var trimEndLabel: TextView
+    private lateinit var trimPanel: LinearLayout
+    private lateinit var mediaPanel: LinearLayout
+    private lateinit var audioPanel: LinearLayout
+    private lateinit var exportPanel: LinearLayout
+    private lateinit var editorPanelHost: LinearLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -208,11 +213,57 @@ class MainActivity : Activity() {
     private fun buildUi(): View {
         val d = resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(18), dp(18), dp(28)); setBackgroundColor(Color.rgb(11, 18, 32)) }
-        root.addView(TextView(this).apply { text = "MINIVIDEOOVERLAY"; textSize = 22f; letterSpacing = 0.08f; setTextColor(Color.WHITE); setTypeface(null, android.graphics.Typeface.BOLD) })
-        root.addView(TextView(this).apply { text = "VIDEO COMPOSER  ·  FULL HD"; textSize = 11f; letterSpacing = 0.12f; setTextColor(Color.rgb(117, 143, 170)) }, margin(dp(4)))
+        val bg = Color.rgb(12, 12, 12)
+        val surface = Color.rgb(29, 29, 29)
+        val muted = Color.rgb(166, 166, 166)
+        val white = Color.WHITE
+        fun rounded(color: Int, radius: Int = 16) = android.graphics.drawable.GradientDrawable().apply {
+            setColor(color); cornerRadius = dp(radius).toFloat()
+        }
+        fun text(value: String, size: Float, color: Int = white, bold: Boolean = false) =
+            TextView(this).apply {
+                text = value; textSize = size; setTextColor(color)
+                if (bold) setTypeface(null, android.graphics.Typeface.BOLD)
+            }
+        fun panel(title: String): LinearLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(15), dp(16), dp(16))
+            background = rounded(surface, 18)
+            addView(text(title, 16f, white, true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
+        }
+        fun actionButton(title: String, primary: Boolean = false, onClick: () -> Unit) =
+            Button(this).apply {
+                text = title; isAllCaps = false; textSize = 13f
+                setTextColor(white)
+                background = rounded(if (primary) Color.rgb(65, 132, 245) else Color.rgb(48, 48, 48), 12)
+                setPadding(dp(14), dp(7), dp(14), dp(7))
+                minHeight = dp(46)
+                setOnClickListener { onClick() }
+            }
 
-        previewFrame = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(20))
+            setBackgroundColor(bg)
+        }
+
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        val brand = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        brand.addView(text("MOTIONIX", 19f, white, true))
+        brand.addView(text("Create Without Limits", 11f, muted))
+        topBar.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
+        exportButton = actionButton("Ekspor", true) { startExport() }
+        topBar.addView(exportButton, LinearLayout.LayoutParams(dp(92), dp(42)))
+        root.addView(topBar, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
+
+        previewFrame = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            background = rounded(Color.BLACK, 14)
+            clipToOutline = true
+        }
         previewTexture = TextureView(this).apply {
             surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                 override fun onSurfaceTextureAvailable(surface: android.graphics.SurfaceTexture, width: Int, height: Int) { if (previewRequested) preparePreview() }
@@ -224,13 +275,30 @@ class MainActivity : Activity() {
         previewOverlay = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_XY; adjustViewBounds = false }
         previewFrame.addView(previewTexture, FrameLayout.LayoutParams(-1, -1))
         previewFrame.addView(previewOverlay, FrameLayout.LayoutParams(-1, -1))
-        root.addView(previewFrame, LinearLayout.LayoutParams(-1, dp(190)).apply { topMargin = dp(14) })
-        previewButton = Button(this).apply { text = "Preview / Putar-Pause"; setOnClickListener { togglePreview() } }
-        root.addView(previewButton, margin(dp(4)))
+        root.addView(previewFrame, LinearLayout.LayoutParams(-1, dp(214)))
 
-        root.addView(section("POTONG VIDEO", dp(20)))
-        trimStartLabel = label()
-        trimEndLabel = label()
+        val previewControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dp(2), dp(8), dp(2), dp(12))
+        }
+        previewButton = TextView(this).apply {
+            text = "▶  Putar preview"; textSize = 13f; setTextColor(white)
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = rounded(Color.rgb(42, 42, 42), 20)
+            setOnClickListener { togglePreview(); text = if (previewPlayer?.isPlaying == true) "Ⅱ  Jeda preview" else "▶  Putar preview" }
+        }
+        previewControls.addView(previewButton)
+        previewControls.addView(text("  •  Preview video", 12f, muted), LinearLayout.LayoutParams(0, -2, 1f))
+        root.addView(previewControls)
+
+        val timelineTitle = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            addView(text("Timeline", 15f, white, true), LinearLayout.LayoutParams(0, -2, 1f))
+            addView(text("POTONG VIDEO", 10f, muted, true))
+        }
+        root.addView(timelineTitle, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
         trimTimeline = RangeTrimTimelineView(this).apply {
             setVideoDuration(videoDurationMs)
             setRange(trimStartMs, trimEndMs)
@@ -240,88 +308,115 @@ class MainActivity : Activity() {
                 updateTrimControls()
             }
         }
-        root.addView(trimTimeline, LinearLayout.LayoutParams(-1, dp(116)).apply { topMargin = dp(8) })
-        root.addView(trimStartLabel, margin(dp(4)))
-        root.addView(trimEndLabel, margin(dp(2)))
-        root.addView(TextView(this).apply {
-            text = "Geser pegangan kiri dan kanan pada timeline untuk memilih bagian video yang ingin dipertahankan."
-            textSize = 12f; setTextColor(Color.rgb(153, 166, 184))
-        }, margin(dp(2)))
+        root.addView(trimTimeline, LinearLayout.LayoutParams(-1, dp(94)))
+        val trimTimes = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+        trimStartLabel = text("00:00:00", 11f, muted)
+        trimEndLabel = text("00:00:00", 11f, muted)
+        trimTimes.addView(trimStartLabel, LinearLayout.LayoutParams(0, -2, 1f))
+        trimTimes.addView(trimEndLabel)
+        root.addView(trimTimes, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4); bottomMargin = dp(16) })
 
-        root.addView(section("INPUT MEDIA", dp(16)))
-        chooseVideoButton = Button(this).apply { text = "Pilih Video Utama"; setOnClickListener { pickFile(REQ_VIDEO, "video/*") } }
-        root.addView(chooseVideoButton)
-        videoLabel = label(); root.addView(videoLabel, margin(dp(2)))
-        choosePngButton = Button(this).apply { text = "Pilih PNG Transparan"; setOnClickListener { pickFile(REQ_PNG, "image/png") } }
-        root.addView(choosePngButton, margin(dp(8)))
-        pngLabel = label(); root.addView(pngLabel, margin(dp(2)))
-        chooseMusicButton = Button(this).apply { text = "Tambah Musik ke Playlist (Bisa Banyak)"; setOnClickListener { pickMusicFiles() } }
-        root.addView(chooseMusicButton, margin(dp(8)))
-        musicLabel = label(); root.addView(musicLabel, margin(dp(2)))
-        musicListContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(musicListContainer, margin(dp(6)))
+        val tools = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, dp(5), 0, dp(12))
+        }
+        fun tool(label: String, symbol: String, key: String) = TextView(this).apply {
+            text = "$symbol\n$label"; textSize = 11f; gravity = android.view.Gravity.CENTER
+            setTextColor(white); setPadding(dp(8), dp(9), dp(8), dp(9))
+            layoutParams = LinearLayout.LayoutParams(0, dp(58), 1f)
+            setOnClickListener { showEditorTool(key) }
+        }
+        tools.addView(tool("Potong", "✂", "trim"))
+        tools.addView(tool("Overlay", "▧", "media"))
+        tools.addView(tool("Audio", "♫", "audio"))
+        tools.addView(tool("Ekspor", "⇧", "export"))
+        root.addView(tools)
 
-        root.addView(section("PENGATURAN AUDIO", dp(18)))
-        videoVolumeLabel = label(); root.addView(videoVolumeLabel)
-        videoSeek = SeekBar(this).apply { max = 100; progress = videoVolume; setOnSeekBarChangeListener(seekListener { videoVolume = it; updateVolumeLabels() }) }
-        root.addView(videoSeek)
-        musicVolumeLabel = label(); root.addView(musicVolumeLabel, margin(dp(8)))
-        musicSeek = SeekBar(this).apply { max = 100; progress = musicVolume; setOnSeekBarChangeListener(seekListener { musicVolume = it; updateVolumeLabels() }) }
-        root.addView(musicSeek)
+        editorPanelHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        trimPanel = panel("Potong video").apply {
+            addView(text("Geser pegangan di timeline untuk menentukan bagian awal dan akhir video.", 12f, muted))
+        }
+        mediaPanel = panel("Media").apply {
+            chooseVideoButton = actionButton("Pilih video", false) { pickFile(REQ_VIDEO, "video/*") }
+            addView(chooseVideoButton)
+            videoLabel = text("Video belum dipilih", 12f, muted)
+            addView(videoLabel, margin(dp(5)))
+            choosePngButton = actionButton("Pilih overlay PNG", false) { pickFile(REQ_PNG, "image/png") }
+            addView(choosePngButton, margin(dp(12)))
+            pngLabel = text("Overlay belum dipilih", 12f, muted)
+            addView(pngLabel, margin(dp(5)))
+        }
+        audioPanel = panel("Audio").apply {
+            chooseMusicButton = actionButton("＋  Tambah musik", false) { pickMusicFiles() }
+            addView(chooseMusicButton)
+            musicLabel = text("Playlist belum ada", 12f, muted)
+            addView(musicLabel, margin(dp(8)))
+            musicListContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+            addView(musicListContainer)
+            videoVolumeLabel = text("Volume video asli: $videoVolume%", 12f, white)
+            addView(videoVolumeLabel, margin(dp(10)))
+            videoSeek = SeekBar(this@MainActivity).apply {
+                max = 100; progress = videoVolume
+                setOnSeekBarChangeListener(seekListener { videoVolume = it; updateVolumeLabels() })
+            }
+            addView(videoSeek)
+            musicVolumeLabel = text("Volume musik tambahan: $musicVolume%", 12f, white)
+            addView(musicVolumeLabel, margin(dp(8)))
+            musicSeek = SeekBar(this@MainActivity).apply {
+                max = 100; progress = musicVolume
+                setOnSeekBarChangeListener(seekListener { musicVolume = it; updateVolumeLabels() })
+            }
+            addView(musicSeek)
+        }
+        exportPanel = panel("Ekspor video").apply {
+            addView(text("Video akan disimpan sebagai MP4 Full HD.", 12f, muted))
+            cancelButton = actionButton("Batalkan ekspor") {
+                startService(Intent(this@MainActivity, ExportService::class.java).setAction(ExportService.ACTION_CANCEL))
+                statusText.text = "Permintaan pembatalan dikirim…"
+            }
+            cancelButton.visibility = View.GONE
+            addView(cancelButton, margin(dp(10)))
+            progress = ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleHorizontal).apply {
+                max = 100; visibility = View.GONE
+                progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(65, 132, 245))
+            }
+            addView(progress, margin(dp(10)))
+            statusText = text("Pilih video dan overlay untuk mulai.", 12f, muted)
+            addView(statusText, margin(dp(8)))
+            playOutputButton = actionButton("Putar hasil", false) { lastOutputUri?.let { openOutput(it) } }
+            shareOutputButton = actionButton("Bagikan hasil", false) { lastOutputUri?.let { shareOutput(it) } }
+            playOutputButton.visibility = View.GONE
+            shareOutputButton.visibility = View.GONE
+            addView(playOutputButton, margin(dp(8)))
+            addView(shareOutputButton, margin(dp(6)))
+        }
+        editorPanelHost.addView(trimPanel)
+        editorPanelHost.addView(mediaPanel)
+        editorPanelHost.addView(audioPanel)
+        editorPanelHost.addView(exportPanel)
+        root.addView(editorPanelHost)
 
-        root.addView(section("EKSPOR", dp(18)))
-        root.addView(TextView(this).apply { text = "Ekspor Full HD dapat menggunakan baterai dan membuat perangkat hangat."; textSize = 12f; setTextColor(Color.DKGRAY) }, margin(dp(2)))
-        exportButton = Button(this).apply { text = "Ekspor Video"; setOnClickListener { startExport() } }
-        root.addView(exportButton, margin(dp(10)))
-        cancelButton = Button(this).apply { text = "Batalkan Ekspor"; visibility = View.GONE; setOnClickListener { startService(Intent(this@MainActivity, ExportService::class.java).setAction(ExportService.ACTION_CANCEL)); statusText.text = "Permintaan pembatalan dikirim…" } }
-        root.addView(cancelButton)
-        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; visibility = View.GONE }
-        root.addView(progress, margin(dp(8)))
-        statusText = label(); root.addView(statusText, margin(dp(4)))
-        playOutputButton = Button(this).apply { text = "Putar Hasil"; visibility = View.GONE; setOnClickListener { lastOutputUri?.let { openOutput(it) } } }
-        shareOutputButton = Button(this).apply { text = "Bagikan Hasil"; visibility = View.GONE; setOnClickListener { lastOutputUri?.let { shareOutput(it) } } }
-        root.addView(playOutputButton, margin(dp(6))); root.addView(shareOutputButton)
-
-        val scroll = ScrollView(this).apply { isFillViewport = true; setBackgroundColor(Color.rgb(11, 18, 32)); addView(root) }
-        applyProfessionalTheme(root)
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            clipToPadding = false
+            setBackgroundColor(bg)
+            addView(root)
+        }
+        showEditorTool("trim")
+        updateVolumeLabels()
         return scroll
     }
 
-    private fun section(text: String, top: Int) = TextView(this).apply {
-        this.text = text; textSize = 11f; letterSpacing = 0.10f; setTextColor(Color.rgb(111, 190, 225)); setTypeface(null, android.graphics.Typeface.BOLD)
-        setPadding(0, top, 0, 6)
-    }
-    private fun label() = TextView(this).apply { textSize = 12f; setTextColor(Color.rgb(204, 215, 228)) }
-
-    private fun applyProfessionalTheme(view: View) {
-        when (view) {
-            is Button -> {
-                view.isAllCaps = false
-                view.textSize = 13f
-                view.setTextColor(Color.WHITE)
-                view.background = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(if (view === exportButton) Color.rgb(36, 126, 190) else Color.rgb(30, 43, 62))
-                    cornerRadius = resources.displayMetrics.density * 12f
-                }
-                view.setPadding(view.paddingLeft, view.paddingTop + 3, view.paddingRight, view.paddingBottom + 3)
-            }
-            is SeekBar -> {
-                view.progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(76, 201, 240))
-                view.thumbTintList = android.content.res.ColorStateList.valueOf(Color.rgb(76, 201, 240))
-                view.progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(48, 64, 84))
-            }
-            is ProgressBar -> {
-                view.progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(76, 201, 240))
-            }
-            is TextView -> {
-                if (view.textColors.defaultColor == Color.BLACK || view.textColors.defaultColor == Color.DKGRAY) {
-                    view.setTextColor(Color.rgb(204, 215, 228))
-                }
-            }
-        }
-        if (view is android.view.ViewGroup) {
-            for (index in 0 until view.childCount) applyProfessionalTheme(view.getChildAt(index))
-        }
+    private fun showEditorTool(tool: String) {
+        if (!::trimPanel.isInitialized) return
+        trimPanel.visibility = if (tool == "trim") View.VISIBLE else View.GONE
+        mediaPanel.visibility = if (tool == "media") View.VISIBLE else View.GONE
+        audioPanel.visibility = if (tool == "audio") View.VISIBLE else View.GONE
+        exportPanel.visibility = if (tool == "export") View.VISIBLE else View.GONE
     }
 
     private fun updateTrimControls() {
