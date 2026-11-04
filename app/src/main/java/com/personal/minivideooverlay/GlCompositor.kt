@@ -1,6 +1,11 @@
 package com.personal.minivideooverlay
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.graphics.SurfaceTexture
 import android.opengl.EGL14
 import android.opengl.EGLConfig
@@ -35,8 +40,11 @@ class GlCompositor(
     private val rotation: Int
     private val overlayPos: Int
     private val overlayTex: Int
+    private val overlayOpacity: Int
     val videoTextureId: Int
     private val overlayTextureId: Int
+    private val musicTextureId: Int
+    private var musicNotificationKey: String? = null
     private val quad: FloatBuffer = ByteBuffer.allocateDirect(QUAD.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(QUAD); position(0) }
 
@@ -73,14 +81,60 @@ class GlCompositor(
         rotation = GLES20.glGetUniformLocation(program, "uRotation")
         overlayPos = GLES20.glGetAttribLocation(overlayProgram, "aPosition")
         overlayTex = GLES20.glGetAttribLocation(overlayProgram, "aTexCoord")
+        overlayOpacity = GLES20.glGetUniformLocation(overlayProgram, "uOpacity")
         videoTextureId = createTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES)
         overlayTextureId = createTexture(GLES20.GL_TEXTURE_2D)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTextureId)
         GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, overlay, 0)
+        musicTextureId = createTexture(GLES20.GL_TEXTURE_2D)
+        val emptyNotification = Bitmap.createBitmap(OverlayConfig.OUTPUT_WIDTH, OverlayConfig.OUTPUT_HEIGHT, Bitmap.Config.ARGB_8888)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, musicTextureId)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, emptyNotification, 0)
+        emptyNotification.recycle()
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
     }
 
-    fun drawFrame(texMatrix: FloatArray, ptsNs: Long) {
+    /** Updates the small top-left now-playing card only when its content changes. */
+    fun updateMusicNotification(cue: MusicTrackCue?) {
+        val key = cue?.let { "${it.title}\u0000${it.artist}" }
+        if (key == musicNotificationKey) return
+        musicNotificationKey = key
+        val bitmap = Bitmap.createBitmap(OverlayConfig.OUTPUT_WIDTH, OverlayConfig.OUTPUT_HEIGHT, Bitmap.Config.ARGB_8888)
+        if (cue != null) {
+            val canvas = Canvas(bitmap)
+            val background = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(218, 10, 17, 27) }
+            val accent = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(82, 197, 255) }
+            val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(105, 207, 255); textSize = 57f; typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            }
+            val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE; textSize = 34f; typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            }
+            val artistPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(190, 205, 220); textSize = 25f; typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            }
+            canvas.drawRoundRect(RectF(42f, 42f, 690f, 164f), 18f, 18f, background)
+            canvas.drawRoundRect(RectF(42f, 42f, 51f, 164f), 5f, 5f, accent)
+            canvas.drawText("♫", 75f, 119f, iconPaint)
+            canvas.drawText(ellipsize(cue.title, titlePaint, 500f), 150f, 94f, titlePaint)
+            val artist = cue.artist.ifBlank { "NOW PLAYING" }
+            canvas.drawText(ellipsize(artist, artistPaint, 500f), 150f, 132f, artistPaint)
+        }
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, musicTextureId)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+        bitmap.recycle()
+    }
+
+    private fun ellipsize(value: String, paint: Paint, maxWidth: Float): String {
+        if (paint.measureText(value) <= maxWidth) return value
+        val suffix = "…"
+        var end = value.length
+        while (end > 0 && paint.measureText(value.substring(0, end) + suffix) > maxWidth) end--
+        return value.substring(0, end).trimEnd() + suffix
+    }
+
+    fun drawFrame(texMatrix: FloatArray, ptsNs: Long, musicOpacity: Float = 1f) {
         GLES20.glViewport(0, 0, OverlayConfig.OUTPUT_WIDTH, OverlayConfig.OUTPUT_HEIGHT)
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -100,8 +154,21 @@ class GlCompositor(
         GLES20.glEnable(GLES20.GL_BLEND)
         GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
         GLES20.glUseProgram(overlayProgram)
+        GLES20.glUniform1f(overlayOpacity, 1f)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTextureId)
+        bind(overlayPos, overlayTex)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES20.glDisableVertexAttribArray(overlayPos)
+        GLES20.glDisableVertexAttribArray(overlayTex)
+
+        // The notification is a separate transparent layer, above both gameplay and user PNG.
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        GLES20.glUseProgram(overlayProgram)
+        GLES20.glUniform1f(overlayOpacity, musicOpacity.coerceIn(0f, 1f))
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, musicTextureId)
         bind(overlayPos, overlayTex)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         GLES20.glDisableVertexAttribArray(overlayPos)
@@ -113,7 +180,7 @@ class GlCompositor(
 
     fun release() {
         runCatching {
-            GLES20.glDeleteTextures(2, intArrayOf(videoTextureId, overlayTextureId), 0)
+            GLES20.glDeleteTextures(3, intArrayOf(videoTextureId, overlayTextureId, musicTextureId), 0)
             GLES20.glDeleteProgram(program)
             GLES20.glDeleteProgram(overlayProgram)
         }
@@ -184,6 +251,6 @@ class GlCompositor(
               gl_FragColor = texture2D(sTexture, uv);
             }
         """.trimIndent()
-        private const val OVERLAY_FRAGMENT = "precision mediump float; uniform sampler2D sTexture; varying vec2 vTex; void main(){gl_FragColor=texture2D(sTexture,vec2(vTex.x,1.0-vTex.y));}"
+        private const val OVERLAY_FRAGMENT = "precision mediump float; uniform sampler2D sTexture; uniform float uOpacity; varying vec2 vTex; void main(){gl_FragColor=texture2D(sTexture,vec2(vTex.x,1.0-vTex.y))*uOpacity;}"
     }
 }

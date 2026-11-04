@@ -36,7 +36,7 @@ import android.widget.ScrollView
 class MainActivity : Activity() {
     private var videoUri: Uri? = null
     private var pngUri: Uri? = null
-    private var musicUri: Uri? = null
+    private val musicUris = mutableListOf<Uri>()
     private var exportReceiverRegistered = false
     private val exportReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -95,7 +95,7 @@ class MainActivity : Activity() {
         savedInstanceState?.let {
             videoUri = it.getString(KEY_VIDEO)?.let(Uri::parse)
             pngUri = it.getString(KEY_PNG)?.let(Uri::parse)
-            musicUri = it.getString(KEY_MUSIC)?.let(Uri::parse)
+            musicUris.clear(); musicUris.addAll(it.getStringArrayList(KEY_MUSIC_LIST)?.map(Uri::parse) ?: emptyList())
             videoVolume = it.getInt(KEY_VIDEO_VOL, 100)
             musicVolume = it.getInt(KEY_MUSIC_VOL, 100)
         }
@@ -133,7 +133,7 @@ class MainActivity : Activity() {
         super.onSaveInstanceState(outState)
         videoUri?.let { outState.putString(KEY_VIDEO, it.toString()) }
         pngUri?.let { outState.putString(KEY_PNG, it.toString()) }
-        musicUri?.let { outState.putString(KEY_MUSIC, it.toString()) }
+        outState.putStringArrayList(KEY_MUSIC_LIST, ArrayList(musicUris.map { it.toString() }))
         outState.putInt(KEY_VIDEO_VOL, videoVolume); outState.putInt(KEY_MUSIC_VOL, musicVolume)
     }
 
@@ -146,20 +146,31 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (resultCode != RESULT_OK) return
-        val uri = data?.data ?: return
-        val flags = data.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        runCatching { contentResolver.takePersistableUriPermission(uri, flags and Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        val uri = data?.data
+        val flags = (data?.flags ?: 0) and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        if (requestCode == REQ_MUSIC) {
+            val selected = mutableListOf<Uri>()
+            data?.clipData?.let { clip -> for (i in 0 until clip.itemCount) selected.add(clip.getItemAt(i).uri) }
+            if (selected.isEmpty() && uri != null) selected.add(uri)
+            selected.forEach { chosen ->
+                runCatching { contentResolver.takePersistableUriPermission(chosen, flags and Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                if (!musicUris.contains(chosen)) musicUris.add(chosen)
+            }
+            refreshUi(); return
+        }
+        val chosenUri = uri ?: return
+        runCatching { contentResolver.takePersistableUriPermission(chosenUri, flags and Intent.FLAG_GRANT_READ_URI_PERMISSION) }
         when (requestCode) {
-            REQ_VIDEO -> { videoUri = uri; releasePreview(); previewRequested = false }
+            REQ_VIDEO -> { videoUri = chosenUri; releasePreview(); previewRequested = false }
             REQ_PNG -> {
                 // Simpan URI segera setelah pengguna memilih file. Validasi tidak boleh
                 // membatalkan pilihan, karena beberapa document provider menghasilkan
                 // metadata/decode bounds yang tidak lengkap meskipun file dapat dibaca.
-                pngUri = uri
-                val warning = validatePng(uri)
-                statusText.text = warning ?: "PNG berhasil dipilih: ${displayName(uri)}"
+                pngUri = chosenUri
+                val warning = validatePng(chosenUri)
+                statusText.text = warning ?: "PNG berhasil dipilih: ${displayName(chosenUri)}"
             }
-            REQ_MUSIC -> musicUri = uri
+            REQ_MUSIC -> { if (!musicUris.contains(uri)) musicUris.add(uri) }
         }
         refreshUi()
         updatePreviewOverlay()
@@ -195,7 +206,7 @@ class MainActivity : Activity() {
         choosePngButton = Button(this).apply { text = "Pilih PNG Transparan"; setOnClickListener { pickFile(REQ_PNG, "image/png") } }
         root.addView(choosePngButton, margin(dp(8)))
         pngLabel = label(); root.addView(pngLabel, margin(dp(2)))
-        chooseMusicButton = Button(this).apply { text = "Pilih Musik Tambahan (Opsional)"; setOnClickListener { pickFile(REQ_MUSIC, "audio/*") } }
+        chooseMusicButton = Button(this).apply { text = "Tambah Musik ke Playlist (Bisa Banyak)"; setOnClickListener { pickMusicFiles() } }
         root.addView(chooseMusicButton, margin(dp(8)))
         musicLabel = label(); root.addView(musicLabel, margin(dp(2)))
 
@@ -236,6 +247,14 @@ class MainActivity : Activity() {
         override fun onStopTrackingTouch(seekBar: SeekBar?) {}
     }
 
+    private fun pickMusicFiles() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE); type = "audio/*"; putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        startActivityForResult(intent, REQ_MUSIC)
+    }
+
     private fun pickFile(request: Int, mime: String) {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE); type = mime
@@ -270,7 +289,7 @@ class MainActivity : Activity() {
             action = ExportService.ACTION_START
             putExtra(ExportService.EXTRA_VIDEO, video.toString())
             putExtra(ExportService.EXTRA_PNG, png.toString())
-            putExtra(ExportService.EXTRA_MUSIC, musicUri?.toString())
+            putStringArrayListExtra(ExportService.EXTRA_MUSIC_LIST, ArrayList(musicUris.map { it.toString() }))
             putExtra(ExportService.EXTRA_VIDEO_VOLUME, videoVolume)
             putExtra(ExportService.EXTRA_MUSIC_VOLUME, musicVolume)
         }
@@ -370,7 +389,7 @@ class MainActivity : Activity() {
         val busy = ExportServiceState.isRunning
         videoLabel.text = "Video: ${videoUri?.let { displayName(it) + " • " + mediaDuration(it) } ?: "Belum dipilih"}"
         pngLabel.text = "PNG: ${pngUri?.let { displayName(it) } ?: "Belum dipilih"}"
-        musicLabel.text = "Musik: ${musicUri?.let { displayName(it) + " • " + mediaDuration(it) } ?: "Tidak dipilih (opsional)"}"
+        musicLabel.text = if (musicUris.isEmpty()) "Playlist: belum ada musik (opsional)" else "Playlist (${musicUris.size} lagu):\n" + musicUris.mapIndexed { i, uri -> "${i + 1}. ${displayName(uri)} • ${mediaDuration(uri)}" }.joinToString("\n") + "\n\nPemutaran berurutan dan diulang sampai video selesai."
         updateVolumeLabels()
         chooseVideoButton.isEnabled = !busy
         choosePngButton.isEnabled = !busy
@@ -422,7 +441,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_VIDEO = 1001; private const val REQ_PNG = 1002; private const val REQ_MUSIC = 1003
-        private const val KEY_VIDEO = "video_uri"; private const val KEY_PNG = "png_uri"; private const val KEY_MUSIC = "music_uri"
+        private const val KEY_VIDEO = "video_uri"; private const val KEY_PNG = "png_uri"; private const val KEY_MUSIC_LIST = "music_uri_list"
         private const val KEY_VIDEO_VOL = "video_volume"; private const val KEY_MUSIC_VOL = "music_volume"
     }
 }

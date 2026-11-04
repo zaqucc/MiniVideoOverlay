@@ -6,8 +6,10 @@ import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
@@ -17,18 +19,116 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
+/** One playlist entry on the same sequential timeline used by the PCM playlist. */
+data class MusicTrackCue(
+    val title: String,
+    val artist: String,
+    val startUs: Long,
+    val durationUs: Long
+)
+
+data class MusicNotificationState(val cue: MusicTrackCue, val opacity: Float)
+
 /** Bounded-memory offline PCM decode, gain/mix, AAC encode. Temporary PCM is stored in app cache. */
 class AudioPipeline(private val context: Context, private val isCancelled: () -> Boolean) {
     data class EncodedAudio(val file: File?, val durationUs: Long)
 
-    fun createMixedTrack(videoUri: Uri, musicUri: Uri?, durationUs: Long,
+    /** Reads the same ordered playlist metadata before video rendering so title cards can be burned in. */
+    fun inspectMusicPlaylist(musicUris: List<Uri>, maxTrackDurationUs: Long): List<MusicTrackCue> {
+        var cursorUs = 0L
+        val cues = mutableListOf<MusicTrackCue>()
+        musicUris.forEach { uri ->
+            checkCancel()
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, uri)
+                val durationUs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull()?.coerceAtLeast(0L)?.times(1_000L)?.takeIf { it > 0L }
+                    ?: readAudioDurationUs(uri)
+                val boundedDurationUs = durationUs.coerceAtMost(maxTrackDurationUs)
+                val rawTitle = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+                val rawArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
+                val fallbackName = queryDisplayName(uri)
+                val title = rawTitle?.takeIf { it.isNotBlank() } ?: fallbackName.substringBeforeLast('.', fallbackName)
+                val artist = rawArtist?.takeIf { it.isNotBlank() } ?: "Unknown artist"
+                if (boundedDurationUs > 0L) {
+                    cues += MusicTrackCue(title, artist, cursorUs, boundedDurationUs)
+                    cursorUs += boundedDurationUs
+                }
+            } catch (_: Throwable) {
+                // A metadata reader may not understand a container that the decoder can still play.
+                val fallbackName = queryDisplayName(uri)
+                val name = fallbackName.substringBeforeLast('.', fallbackName)
+                val durationUs = readAudioDurationUs(uri).coerceAtMost(maxTrackDurationUs)
+                if (durationUs > 0L) {
+                    cues += MusicTrackCue(name.ifBlank { "Unknown track" }, "Unknown artist", cursorUs, durationUs)
+                    cursorUs += durationUs
+                }
+            } finally {
+                runCatching { retriever.release() }
+            }
+        }
+        return cues
+    }
+
+    private fun readAudioDurationUs(uri: Uri): Long {
+        val extractor = MediaExtractor()
+        var pfd: ParcelFileDescriptor? = null
+        return try {
+            pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return 0L
+            extractor.setDataSource(pfd.fileDescriptor)
+            for (index in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(index)
+                val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
+                if (mime.startsWith("audio/") && format.containsKey(MediaFormat.KEY_DURATION)) {
+                    return format.getLong(MediaFormat.KEY_DURATION).coerceAtLeast(0L)
+                }
+            }
+            0L
+        } catch (_: Throwable) {
+            0L
+        } finally {
+            runCatching { extractor.release() }
+            runCatching { pfd?.close() }
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String {
+        return runCatching {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0).orEmpty() else ""
+            }.orEmpty()
+        }.getOrDefault("").ifBlank { "Music" }
+    }
+
+    fun createMixedTrack(videoUri: Uri, musicUris: List<Uri>, durationUs: Long,
                          videoGain: Float, musicGain: Float): EncodedAudio {
         val videoPcm = File.createTempFile("mvo_video_", ".pcm", context.cacheDir)
-        val musicPcm = if (musicUri != null) File.createTempFile("mvo_music_", ".pcm", context.cacheDir) else null
+        val musicPcm = if (musicUris.isNotEmpty()) File.createTempFile("mvo_playlist_", ".pcm", context.cacheDir) else null
         val mixedMp4 = File.createTempFile("mvo_audio_", ".mp4", context.cacheDir)
         try {
             val hasVideoAudio = decodeToCanonicalPcm(videoUri, videoPcm, optional = true, maxDurationUs = durationUs, preserveInitialTimestamp = true)
-            val hasMusic = if (musicUri != null && musicPcm != null) decodeToCanonicalPcm(musicUri, musicPcm, optional = false, maxDurationUs = durationUs, preserveInitialTimestamp = false) else false
+            val hasMusic = if (musicPcm != null) {
+                var any = false
+                RandomAccessFile(musicPcm, "rw").use { playlistOut ->
+                    playlistOut.setLength(0)
+                    musicUris.forEachIndexed { index, uri ->
+                        checkCancel()
+                        val trackPcm = File.createTempFile("mvo_track_", ".pcm", context.cacheDir)
+                        try {
+                            val decoded = decodeToCanonicalPcm(uri, trackPcm, optional = false, maxDurationUs = durationUs, preserveInitialTimestamp = false)
+                            if (decoded && trackPcm.length() > 0L) {
+                                trackPcm.inputStream().buffered().use { input ->
+                                    val buffer = ByteArray(64 * 1024)
+                                    while (true) { checkCancel(); val count = input.read(buffer); if (count < 0) break; playlistOut.write(buffer, 0, count) }
+                                }
+                                any = true
+                            }
+                        } finally { trackPcm.delete() }
+                    }
+                }
+                any
+            } else false
             if (!hasVideoAudio && !hasMusic) {
                 mixedMp4.delete()
                 return EncodedAudio(null, durationUs)

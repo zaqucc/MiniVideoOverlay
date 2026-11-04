@@ -41,7 +41,7 @@ class ExportService : Service() {
                 if (worker?.isAlive == true) return START_NOT_STICKY
                 val video = intent.getStringExtra(EXTRA_VIDEO)?.let(Uri::parse)
                 val png = intent.getStringExtra(EXTRA_PNG)?.let(Uri::parse)
-                val music = intent.getStringExtra(EXTRA_MUSIC)?.let(Uri::parse)
+                val music = intent.getStringArrayListExtra(EXTRA_MUSIC_LIST)?.mapNotNull { runCatching { Uri.parse(it) }.getOrNull() } ?: emptyList()
                 if (video == null || png == null) {
                     stopSelf(startId)
                     return START_NOT_STICKY
@@ -146,7 +146,7 @@ class ExportService : Service() {
         const val ACTION_FINISHED = "com.personal.minivideooverlay.EXPORT_FINISHED"
         const val ACTION_FAILED = "com.personal.minivideooverlay.EXPORT_FAILED"
         const val ACTION_STATE_CHANGED = "com.personal.minivideooverlay.EXPORT_STATE_CHANGED"
-        const val EXTRA_VIDEO = "video"; const val EXTRA_PNG = "png"; const val EXTRA_MUSIC = "music"
+        const val EXTRA_VIDEO = "video"; const val EXTRA_PNG = "png"; const val EXTRA_MUSIC_LIST = "music_list"
         const val EXTRA_VIDEO_VOLUME = "video_volume"; const val EXTRA_MUSIC_VOLUME = "music_volume"
         const val EXTRA_PROGRESS = "progress"; const val EXTRA_MESSAGE = "message"
         const val EXTRA_OUTPUT = "output"; const val EXTRA_FILENAME = "filename"

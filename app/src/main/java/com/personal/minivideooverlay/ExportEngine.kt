@@ -45,7 +45,7 @@ class ExportEngine(private val appContext: Context) {
 
     fun cancel() { cancelled = true }
 
-    fun export(videoUri: Uri, pngUri: Uri, musicUri: Uri?, videoVolume: Int, musicVolume: Int,
+    fun export(videoUri: Uri, pngUri: Uri, musicUris: List<Uri>, videoVolume: Int, musicVolume: Int,
                onProgress: (Int, String) -> Unit): Result {
         val resolver = appContext.contentResolver
         state = ExportState.Validating
@@ -74,6 +74,8 @@ class ExportEngine(private val appContext: Context) {
             val sourceMime = sourceFormat.getString(MediaFormat.KEY_MIME) ?: throw ExportException("Codec video sumber tidak dikenali.")
             val durationUs = if (sourceFormat.containsKey(MediaFormat.KEY_DURATION)) sourceFormat.getLong(MediaFormat.KEY_DURATION) else 0L
             if (durationUs <= 0L) throw ExportException("Durasi video tidak tersedia atau metadata rusak.")
+            // Read playlist labels/timing before rendering so notifications are composited into every frame.
+            val musicCues = AudioPipeline(appContext) { cancelled }.inspectMusicPlaylist(musicUris, durationUs)
             val sourceW = sourceFormat.getInteger(MediaFormat.KEY_WIDTH)
             val sourceH = sourceFormat.getInteger(MediaFormat.KEY_HEIGHT)
             val rotation = if (sourceFormat.containsKey(ROTATION_KEY)) sourceFormat.getInteger(ROTATION_KEY) else 0
@@ -103,7 +105,7 @@ class ExportEngine(private val appContext: Context) {
 
             state = ExportState.Exporting
             onProgress(5, "Merender video dan PNG…")
-            renderVideo(extractor, sourceMime, sourceFormat, decoderSurface!!, texture, compositor!!, durationUs) { pts ->
+            renderVideo(extractor, sourceMime, sourceFormat, decoderSurface!!, texture, compositor!!, durationUs, musicCues) { pts ->
                 onProgress((5 + (pts * 72L / durationUs).toInt()).coerceIn(5, 77), "Merender frame video…")
             }
             encoder.signalEndOfInputStream()
@@ -125,7 +127,7 @@ class ExportEngine(private val appContext: Context) {
             state = ExportState.Finalizing
             onProgress(79, "Memproses audio dan musik…")
             val audio = AudioPipeline(appContext) { cancelled }.createMixedTrack(
-                videoUri, musicUri, durationUs, videoVolume / 100f, musicVolume / 100f
+                videoUri, musicUris, durationUs, videoVolume / 100f, musicVolume / 100f
             )
             audioTemp = audio.file
             val hasOutputAudio = audio.file != null
@@ -197,9 +199,25 @@ class ExportEngine(private val appContext: Context) {
         }
     }
 
+    private fun notificationAt(ptsUs: Long, cues: List<MusicTrackCue>): MusicNotificationState? {
+        val valid = cues.filter { it.durationUs > 0L }
+        val cycleUs = valid.sumOf { it.durationUs }
+        if (cycleUs <= 0L) return null
+        val positionUs = ptsUs % cycleUs
+        val cue = valid.lastOrNull { it.startUs <= positionUs } ?: return null
+        val elapsedUs = positionUs - cue.startUs
+        if (elapsedUs >= MUSIC_NOTIFICATION_DURATION_US) return null
+        val fadeIn = (elapsedUs.toFloat() / MUSIC_NOTIFICATION_FADE_IN_US).coerceIn(0f, 1f)
+        val fadeOutStartUs = MUSIC_NOTIFICATION_DURATION_US - MUSIC_NOTIFICATION_FADE_OUT_US
+        val fadeOut = if (elapsedUs > fadeOutStartUs) {
+            ((MUSIC_NOTIFICATION_DURATION_US - elapsedUs).toFloat() / MUSIC_NOTIFICATION_FADE_OUT_US).coerceIn(0f, 1f)
+        } else 1f
+        return MusicNotificationState(cue, minOf(fadeIn, fadeOut))
+    }
+
     private fun renderVideo(extractor: MediaExtractor, mime: String, format: MediaFormat,
                             surface: Surface, texture: SurfaceTexture, compositor: GlCompositor,
-                            durationUs: Long, progress: (Long) -> Unit) {
+                            durationUs: Long, musicCues: List<MusicTrackCue>, progress: (Long) -> Unit) {
         val decoder = try { MediaCodec.createDecoderByType(mime) }
         catch (t: Throwable) { throw ExportException("Decoder video $mime tidak tersedia: ${t.message}") }
         val matrix = FloatArray(16)
@@ -243,7 +261,9 @@ class ExportEngine(private val appContext: Context) {
                                 if (!frameSignal.tryAcquire(OverlayConfig.FRAME_TIMEOUT_MS, TimeUnit.MILLISECONDS)) throw ExportException("Timeout saat menunggu frame hasil decode.")
                                 texture.updateTexImage(); texture.getTransformMatrix(matrix)
                                 val safePts = max(pts, lastPts + 1L)
-                                compositor.drawFrame(matrix, safePts * 1000L)
+                                val notification = notificationAt(pts, musicCues)
+                                compositor.updateMusicNotification(notification?.cue)
+                                compositor.drawFrame(matrix, safePts * 1000L, notification?.opacity ?: 0f)
                                 drainVideoEncoder(false)
                                 lastPts = safePts; frames++
                                 progress(pts)
@@ -405,5 +425,10 @@ class ExportEngine(private val appContext: Context) {
 
     private fun checkCancelled() { if (cancelled) throw ExportException("Ekspor dibatalkan oleh pengguna.") }
 
-    companion object { private const val ROTATION_KEY = "rotation-degrees" }
+    companion object {
+        private const val ROTATION_KEY = "rotation-degrees"
+        private const val MUSIC_NOTIFICATION_DURATION_US = 3_000_000L
+        private const val MUSIC_NOTIFICATION_FADE_IN_US = 250_000L
+        private const val MUSIC_NOTIFICATION_FADE_OUT_US = 350_000L
+    }
 }
