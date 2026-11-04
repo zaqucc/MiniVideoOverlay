@@ -1,27 +1,21 @@
-# Mini Video Overlay — diagnostic cloud build
+# MiniVideoOverlay 2.0
 
-This package keeps the app source and adds a GitHub Actions workflow that captures the **complete Gradle build log**, even when the build fails. The app output is Full HD (see the specification below).
+Android native Kotlin video compositor. All media processing is performed locally using Android MediaExtractor, MediaCodec, OpenGL ES and MediaMuxer. No media is uploaded.
 
-## Build from a phone (no PC / Android Studio)
+## Implemented source features
+- Fixed 1920x1080 landscape H.264 output with opaque #000000 background.
+- Video uniformly scaled to fill canvas width, centered vertically; no source crop/stretch. Areas outside the video image remain black or are clipped only by the fixed output canvas.
+- Rotation metadata is applied in the GL sampling shader.
+- Full-canvas PNG overlay with alpha blending. Non-16:9 PNG is proportionally contained on a transparent 1920x1080 canvas. PNG without alpha is rejected.
+- Source video duration drives the export timeline.
+- Optional source-video audio and optional added music are decoded, converted to 48 kHz stereo PCM, gain-adjusted, mixed, and AAC-encoded. Added music loops to the video duration.
+- H.264 video and one mixed AAC track are muxed into one MP4.
+- Separate 0–100% volume controls, progress, cancellation, preview, playback and share actions.
+- MediaStore output at `Movies/MiniVideoOverlay`, using pending publication and failure cleanup.
+- Bounded PCM processing with temporary app-cache files; no whole video/PCM stream is held in RAM.
 
-1. Open the GitHub repository in your mobile browser.
-2. Upload the contents of this folder to the repository root, replacing the existing files when prompted. Make sure `.github/workflows/android-apk.yml` is included. If the browser hides `.github`, enable hidden files in your file manager before uploading.
-3. Commit the changes to `main`.
-4. Open **Actions → Build Android APK** and open the newest run.
-5. If the build fails, download the artifact named **MiniVideoOverlay-build-diagnostic-log**. It contains `build-debug.log` and `build-exit-code.txt`. Send those files back for diagnosis.
-6. If the build succeeds, download **MiniVideoOverlay-debug-apk**, extract it, and install `app-debug.apk`.
+## Build
+Requirements: JDK 17, Android SDK platform 35, Gradle 8.7, Android Gradle Plugin 8.6.1. Open the project root in Android Studio and run `:app:assembleDebug`.
 
-The APK artifact is only uploaded when the build succeeds. A successful cloud build does not replace testing the exported MP4 on the target phone.
-
-## Output specification (Full HD update)
-
-| Item | Value |
-|---|---|
-| Output | MP4, H.264, 1080 × 1920 (9:16). No fallback to a lower resolution: if the device encoder cannot do 1080×1920, the export fails with a clear message |
-| Duration | Exactly 15 s: first 15 s if the source is longer, looped from the start if shorter (never a frozen frame) |
-| Audio | None. The audio track is never read, so the MP4 has no audio stream |
-| Background | Source video, center-cropped to 9:16, subtle Gaussian blur (9-tap, applied horizontally and vertically) |
-| Overlay | Square photo, 960 × 960 at X=60, Y=480, center-cropped, sharp |
-| Shadow | Black, 20% opacity, ~12 px blur, offset X 0 / Y 4 px, behind the photo |
-
-All values live in `OverlayConfig.kt`. Files changed from the previous build: `OverlayConfig.kt`, `GlCompositor.kt`, `ExportEngine.kt`, `README.md`. `MainActivity.kt`, Gradle files, manifest, and the GitHub Actions workflow are unchanged.
+## Important validation notes
+This source has not been built or exercised on a physical Android device in the current environment. Codec support varies by device. The PCM conversion currently assumes Android decoder output is signed 16-bit PCM; unsupported decoder PCM formats fail with a visible error. Audio timestamp gaps/edit lists and variable-frame-rate behavior require device media test coverage before release.
