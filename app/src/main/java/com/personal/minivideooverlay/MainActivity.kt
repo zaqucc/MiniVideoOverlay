@@ -484,7 +484,7 @@ class MainActivity : Activity() {
     }
 
     private fun updatePreviewOverlay() {
-        val uri = pngUri ?: run { previewOverlay.setImageDrawable(null); return }
+        val uri = pngUri ?: run { clearPreviewOverlay(); return }
         runCatching {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
