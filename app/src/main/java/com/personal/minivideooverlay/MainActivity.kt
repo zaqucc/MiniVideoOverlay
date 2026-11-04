@@ -266,8 +266,9 @@ class MainActivity : Activity() {
     private fun validatePng(uri: Uri): String? {
         return try {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            ?: return "PNG tidak dapat dibuka."
+        val boundsStream = contentResolver.openInputStream(uri)
+            ?: return "PNG tidak dapat dibuka. Periksa akses file lalu pilih ulang PNG."
+        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return "File bukan PNG gambar yang valid."
         val sample = maxOf(1, maxOf(bounds.outWidth / 1920, bounds.outHeight / 1080))
         val opts = BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888 }
