@@ -211,7 +211,7 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply { text = "Ekspor Full HD dapat menggunakan baterai dan membuat perangkat hangat."; textSize = 12f; setTextColor(Color.DKGRAY) }, margin(dp(2)))
         exportButton = Button(this).apply { text = "Ekspor Video"; setOnClickListener { startExport() } }
         root.addView(exportButton, margin(dp(10)))
-        cancelButton = Button(this).apply { text = "Batalkan Ekspor"; visibility = View.GONE; setOnClickListener { startService(Intent(this, ExportService::class.java).setAction(ExportService.ACTION_CANCEL)); statusText.text = "Permintaan pembatalan dikirim…" } }
+        cancelButton = Button(this).apply { text = "Batalkan Ekspor"; visibility = View.GONE; setOnClickListener { startService(Intent(this@MainActivity, ExportService::class.java).setAction(ExportService.ACTION_CANCEL)); statusText.text = "Permintaan pembatalan dikirim…" } }
         root.addView(cancelButton)
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; visibility = View.GONE }
         root.addView(progress, margin(dp(8)))
