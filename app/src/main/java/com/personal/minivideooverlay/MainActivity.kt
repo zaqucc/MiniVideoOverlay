@@ -86,6 +86,8 @@ class MainActivity : Activity() {
     private val durationCache = mutableMapOf<String, String>()
     private var previewSurface: Surface? = null
     private var previewRequested = false
+    private var previewPrepared = false
+    private var previewPositionMs = 0L
     private lateinit var previewOverlay: ImageView
     private lateinit var previewFrame: FrameLayout
     private lateinit var videoSeek: SeekBar
@@ -102,6 +104,8 @@ class MainActivity : Activity() {
     private var thumbnailLoadToken = 0
     private lateinit var trimStartLabel: TextView
     private lateinit var trimEndLabel: TextView
+    private lateinit var playheadLabel: TextView
+    private val editorToolViews = mutableMapOf<String, View>()
     private lateinit var trimPanel: LinearLayout
     private lateinit var mediaPanel: LinearLayout
     private lateinit var audioPanel: LinearLayout
@@ -213,55 +217,68 @@ class MainActivity : Activity() {
     private fun buildUi(): View {
         val d = resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
-        val bg = Color.rgb(12, 12, 12)
-        val surface = Color.rgb(29, 29, 29)
-        val muted = Color.rgb(166, 166, 166)
+        val bg = Color.rgb(16, 17, 19)
+        val surface = Color.rgb(30, 31, 34)
+        val surface2 = Color.rgb(42, 43, 47)
+        val muted = Color.rgb(176, 179, 184)
         val white = Color.WHITE
+        val accent = Color.rgb(168, 199, 250)
         fun rounded(color: Int, radius: Int = 16) = android.graphics.drawable.GradientDrawable().apply {
             setColor(color); cornerRadius = dp(radius).toFloat()
         }
         fun text(value: String, size: Float, color: Int = white, bold: Boolean = false) =
             TextView(this).apply {
-                text = value; textSize = size; setTextColor(color)
-                if (bold) setTypeface(null, android.graphics.Typeface.BOLD)
+                text = value
+                textSize = size
+                setTextColor(color)
+                typeface = android.graphics.Typeface.create(
+                    if (bold) "sans-serif-medium" else "sans-serif", android.graphics.Typeface.NORMAL
+                )
+                includeFontPadding = false
             }
         fun panel(title: String): LinearLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(15), dp(16), dp(16))
-            background = rounded(surface, 18)
-            addView(text(title, 16f, white, true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = rounded(surface, 20)
+            addView(text(title, 16f, white, true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(14) })
         }
         fun actionButton(title: String, primary: Boolean = false, onClick: () -> Unit) =
             Button(this).apply {
-                text = title; isAllCaps = false; textSize = 13f
-                setTextColor(white)
-                background = rounded(if (primary) Color.rgb(65, 132, 245) else Color.rgb(48, 48, 48), 12)
-                setPadding(dp(14), dp(7), dp(14), dp(7))
+                text = title
+                isAllCaps = false
+                textSize = 13f
+                typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+                setTextColor(if (primary) Color.rgb(25, 28, 33) else white)
+                background = rounded(if (primary) accent else surface2, 24)
+                setPadding(dp(18), dp(7), dp(18), dp(7))
                 minHeight = dp(46)
+                stateListAnimator = null
                 setOnClickListener { onClick() }
             }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(20))
+            setPadding(dp(16), dp(12), dp(16), dp(24))
             setBackgroundColor(bg)
         }
 
+        // Compact Material-style top app bar.
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
         }
-        val brand = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        brand.addView(text("MOTIONIX", 19f, white, true))
-        brand.addView(text("Create Without Limits", 11f, muted))
-        topBar.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
-        exportButton = actionButton("Ekspor", true) { startExport() }
-        topBar.addView(exportButton, LinearLayout.LayoutParams(dp(92), dp(42)))
-        root.addView(topBar, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
+        val heading = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        heading.addView(text("MOTIONIX", 12f, muted, true))
+        heading.addView(text("Edit video", 21f, white, true), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(3) })
+        topBar.addView(heading, LinearLayout.LayoutParams(0, -2, 1f))
+        exportButton = actionButton("Simpan", true) { startExport() }
+        topBar.addView(exportButton, LinearLayout.LayoutParams(dp(104), dp(44)))
+        root.addView(topBar, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(18) })
 
+        // Large, distraction-free video canvas.
         previewFrame = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
-            background = rounded(Color.BLACK, 14)
+            background = rounded(Color.BLACK, 18)
             clipToOutline = true
         }
         previewTexture = TextureView(this).apply {
@@ -280,92 +297,127 @@ class MainActivity : Activity() {
         val previewControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
-            setPadding(dp(2), dp(8), dp(2), dp(12))
+            setPadding(dp(2), dp(12), dp(2), dp(18))
         }
         previewButton = TextView(this).apply {
-            text = "▶  Putar preview"; textSize = 13f; setTextColor(white)
-            setPadding(dp(12), dp(9), dp(12), dp(9))
-            background = rounded(Color.rgb(42, 42, 42), 20)
-            setOnClickListener { togglePreview(); text = if (previewPlayer?.isPlaying == true) "Ⅱ  Jeda preview" else "▶  Putar preview" }
+            text = "▶"
+            textSize = 18f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(Color.rgb(25, 28, 33))
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+            background = rounded(accent, 28)
+            layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
+            setOnClickListener { togglePreview() }
         }
         previewControls.addView(previewButton)
-        previewControls.addView(text("  •  Preview video", 12f, muted), LinearLayout.LayoutParams(0, -2, 1f))
+        playheadLabel = text("00:00:00", 14f, white, true).apply {
+            gravity = android.view.Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        }
+        previewControls.addView(playheadLabel)
+        previewControls.addView(text(formatTime(videoDurationMs), 12f, muted))
         root.addView(previewControls)
 
-        val timelineTitle = LinearLayout(this).apply {
+        // Filmstrip with independent start/end grips and a separate white playhead.
+        val timelineHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
-            addView(text("Timeline", 15f, white, true), LinearLayout.LayoutParams(0, -2, 1f))
-            addView(text("POTONG VIDEO", 10f, muted, true))
+            addView(text("Potong", 18f, white, true), LinearLayout.LayoutParams(0, -2, 1f))
+            addView(text("TRIM", 10f, muted, true))
         }
-        root.addView(timelineTitle, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        root.addView(timelineHeader, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
         trimTimeline = RangeTrimTimelineView(this).apply {
             setVideoDuration(videoDurationMs)
             setRange(trimStartMs, trimEndMs)
+            setPlayhead(previewPositionMs)
             onRangeChanged = { start, end ->
                 trimStartMs = start
                 trimEndMs = end
+                if (previewPositionMs < start || previewPositionMs > end) {
+                    previewPositionMs = start
+                    setPlayhead(previewPositionMs)
+                    seekPreviewTo(previewPositionMs)
+                }
                 updateTrimControls()
             }
+            onScrubStarted = {
+                previewRequested = false
+                runCatching { previewPlayer?.pause() }
+                main.removeCallbacks(previewTicker)
+                updatePreviewButton()
+            }
+            onPlayheadChanged = { position ->
+                previewPositionMs = position
+                playheadLabel.text = formatTime(position)
+                seekPreviewTo(position)
+            }
         }
-        root.addView(trimTimeline, LinearLayout.LayoutParams(-1, dp(94)))
+        root.addView(trimTimeline, LinearLayout.LayoutParams(-1, dp(112)))
+
         val trimTimes = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dp(2), dp(10), dp(2), dp(18))
         }
-        trimStartLabel = text("00:00:00", 11f, muted)
-        trimEndLabel = text("00:00:00", 11f, muted)
+        trimStartLabel = text("MULAI  00:00:00", 12f, white, true)
+        trimEndLabel = text("AKHIR  00:00:00", 12f, white, true)
         trimTimes.addView(trimStartLabel, LinearLayout.LayoutParams(0, -2, 1f))
         trimTimes.addView(trimEndLabel)
-        root.addView(trimTimes, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4); bottomMargin = dp(16) })
+        root.addView(trimTimes)
 
+        // Symmetrical icon-and-label tool dock. Icons are drawn as simple Material-style line art.
         val tools = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER
-            setPadding(0, dp(5), 0, dp(12))
+            background = rounded(surface, 22)
+            setPadding(dp(4), dp(8), dp(4), dp(8))
         }
-        fun tool(label: String, symbol: String, key: String) = TextView(this).apply {
-            text = "$symbol\n$label"; textSize = 11f; gravity = android.view.Gravity.CENTER
-            setTextColor(white); setPadding(dp(8), dp(9), dp(8), dp(9))
-            layoutParams = LinearLayout.LayoutParams(0, dp(58), 1f)
+        fun tool(label: String, key: String) = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER
+            setPadding(dp(4), dp(8), dp(4), dp(8))
+            layoutParams = LinearLayout.LayoutParams(0, dp(76), 1f)
+            addView(createMaterialToolIcon(key, muted), LinearLayout.LayoutParams(dp(24), dp(24)))
+            addView(text(label, 11f, muted, true), LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(7) })
             setOnClickListener { showEditorTool(key) }
+            editorToolViews[key] = this
         }
-        tools.addView(tool("Potong", "✂", "trim"))
-        tools.addView(tool("Overlay", "▧", "media"))
-        tools.addView(tool("Audio", "♫", "audio"))
-        tools.addView(tool("Ekspor", "⇧", "export"))
-        root.addView(tools)
+        tools.addView(tool("Potong", "trim"))
+        tools.addView(tool("Overlay", "media"))
+        tools.addView(tool("Audio", "audio"))
+        tools.addView(tool("Ekspor", "export"))
+        root.addView(tools, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(14) })
 
         editorPanelHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        trimPanel = panel("Potong video").apply {
-            addView(text("Geser pegangan di timeline untuk menentukan bagian awal dan akhir video.", 12f, muted))
+        trimPanel = panel("Rentang video").apply {
+            addView(text("Geser garis putih untuk mencari frame. Tarik pegangan kiri dan kanan untuk menentukan bagian yang disimpan.", 13f, muted))
         }
         mediaPanel = panel("Media").apply {
-            chooseVideoButton = actionButton("Pilih video", false) { pickFile(REQ_VIDEO, "video/*") }
+            chooseVideoButton = actionButton("Pilih video") { pickFile(REQ_VIDEO, "video/*") }
             addView(chooseVideoButton)
             videoLabel = text("Video belum dipilih", 12f, muted)
-            addView(videoLabel, margin(dp(5)))
-            choosePngButton = actionButton("Pilih overlay PNG", false) { pickFile(REQ_PNG, "image/png") }
-            addView(choosePngButton, margin(dp(12)))
+            addView(videoLabel, margin(dp(8)))
+            choosePngButton = actionButton("Pilih overlay PNG") { pickFile(REQ_PNG, "image/png") }
+            addView(choosePngButton, margin(dp(16)))
             pngLabel = text("Overlay belum dipilih", 12f, muted)
-            addView(pngLabel, margin(dp(5)))
+            addView(pngLabel, margin(dp(8)))
         }
         audioPanel = panel("Audio").apply {
-            chooseMusicButton = actionButton("＋  Tambah musik", false) { pickMusicFiles() }
+            chooseMusicButton = actionButton("＋  Tambah musik") { pickMusicFiles() }
             addView(chooseMusicButton)
             musicLabel = text("Playlist belum ada", 12f, muted)
-            addView(musicLabel, margin(dp(8)))
+            addView(musicLabel, margin(dp(10)))
             musicListContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
             addView(musicListContainer)
-            videoVolumeLabel = text("Volume video asli: $videoVolume%", 12f, white)
-            addView(videoVolumeLabel, margin(dp(10)))
+            videoVolumeLabel = text("Volume video asli: $videoVolume%", 13f, white, true)
+            addView(videoVolumeLabel, margin(dp(14)))
             videoSeek = SeekBar(this@MainActivity).apply {
                 max = 100; progress = videoVolume
                 setOnSeekBarChangeListener(seekListener { videoVolume = it; updateVolumeLabels() })
             }
             addView(videoSeek)
-            musicVolumeLabel = text("Volume musik tambahan: $musicVolume%", 12f, white)
-            addView(musicVolumeLabel, margin(dp(8)))
+            musicVolumeLabel = text("Volume musik tambahan: $musicVolume%", 13f, white, true)
+            addView(musicVolumeLabel, margin(dp(12)))
             musicSeek = SeekBar(this@MainActivity).apply {
                 max = 100; progress = musicVolume
                 setOnSeekBarChangeListener(seekListener { musicVolume = it; updateVolumeLabels() })
@@ -373,26 +425,26 @@ class MainActivity : Activity() {
             addView(musicSeek)
         }
         exportPanel = panel("Ekspor video").apply {
-            addView(text("Video akan disimpan sebagai MP4 Full HD.", 12f, muted))
+            addView(text("Video akan disimpan sebagai MP4 Full HD.", 13f, muted))
             cancelButton = actionButton("Batalkan ekspor") {
                 startService(Intent(this@MainActivity, ExportService::class.java).setAction(ExportService.ACTION_CANCEL))
                 statusText.text = "Permintaan pembatalan dikirim…"
             }
             cancelButton.visibility = View.GONE
-            addView(cancelButton, margin(dp(10)))
+            addView(cancelButton, margin(dp(12)))
             progress = ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleHorizontal).apply {
                 max = 100; visibility = View.GONE
-                progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(65, 132, 245))
+                progressTintList = android.content.res.ColorStateList.valueOf(accent)
             }
-            addView(progress, margin(dp(10)))
+            addView(progress, margin(dp(12)))
             statusText = text("Pilih video dan overlay untuk mulai.", 12f, muted)
-            addView(statusText, margin(dp(8)))
-            playOutputButton = actionButton("Putar hasil", false) { lastOutputUri?.let { openOutput(it) } }
-            shareOutputButton = actionButton("Bagikan hasil", false) { lastOutputUri?.let { shareOutput(it) } }
+            addView(statusText, margin(dp(10)))
+            playOutputButton = actionButton("Putar hasil") { lastOutputUri?.let { openOutput(it) } }
+            shareOutputButton = actionButton("Bagikan hasil") { lastOutputUri?.let { shareOutput(it) } }
             playOutputButton.visibility = View.GONE
             shareOutputButton.visibility = View.GONE
-            addView(playOutputButton, margin(dp(8)))
-            addView(shareOutputButton, margin(dp(6)))
+            addView(playOutputButton, margin(dp(10)))
+            addView(shareOutputButton, margin(dp(8)))
         }
         editorPanelHost.addView(trimPanel)
         editorPanelHost.addView(mediaPanel)
@@ -411,12 +463,78 @@ class MainActivity : Activity() {
         return scroll
     }
 
+    private fun createMaterialToolIcon(kind: String, tint: Int): View {
+        return object : View(this) {
+            private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = tint
+                style = Paint.Style.STROKE
+                strokeWidth = resources.displayMetrics.density * 1.8f
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+            }
+            override fun onDraw(canvas: Canvas) {
+                super.onDraw(canvas)
+                val s = resources.displayMetrics.density
+                val cx = width / 2f
+                val cy = height / 2f
+                canvas.save()
+                canvas.translate(cx - 12f * s, cy - 12f * s)
+                canvas.scale(s, s)
+                val path = android.graphics.Path()
+                when (kind) {
+                    "trim" -> {
+                        path.moveTo(4f, 7f); path.lineTo(4f, 4f); path.lineTo(7f, 4f)
+                        path.moveTo(17f, 4f); path.lineTo(20f, 4f); path.lineTo(20f, 7f)
+                        path.moveTo(4f, 17f); path.lineTo(4f, 20f); path.lineTo(7f, 20f)
+                        path.moveTo(17f, 20f); path.lineTo(20f, 20f); path.lineTo(20f, 17f)
+                        canvas.drawPath(path, paint)
+                        canvas.drawLine(7f, 12f, 17f, 12f, paint)
+                    }
+                    "media" -> {
+                        path.moveTo(12f, 3f); path.lineTo(21f, 8f); path.lineTo(12f, 13f); path.lineTo(3f, 8f); path.close()
+                        canvas.drawPath(path, paint)
+                        path.reset(); path.moveTo(3f, 12f); path.lineTo(12f, 17f); path.lineTo(21f, 12f)
+                        canvas.drawPath(path, paint)
+                        path.reset(); path.moveTo(3f, 16f); path.lineTo(12f, 21f); path.lineTo(21f, 16f)
+                        canvas.drawPath(path, paint)
+                    }
+                    "audio" -> {
+                        path.moveTo(9f, 18f); path.lineTo(9f, 5f); path.lineTo(20f, 3f); path.lineTo(20f, 16f)
+                        canvas.drawPath(path, paint)
+                        canvas.drawCircle(6.5f, 18f, 2.5f, paint)
+                        canvas.drawCircle(17.5f, 16f, 2.5f, paint)
+                    }
+                    else -> {
+                        path.moveTo(12f, 16f); path.lineTo(12f, 3f)
+                        path.moveTo(7f, 8f); path.lineTo(12f, 3f); path.lineTo(17f, 8f)
+                        path.moveTo(4f, 14f); path.lineTo(4f, 20f); path.lineTo(20f, 20f); path.lineTo(20f, 14f)
+                        canvas.drawPath(path, paint)
+                    }
+                }
+                canvas.restore()
+            }
+        }
+    }
+
     private fun showEditorTool(tool: String) {
         if (!::trimPanel.isInitialized) return
         trimPanel.visibility = if (tool == "trim") View.VISIBLE else View.GONE
         mediaPanel.visibility = if (tool == "media") View.VISIBLE else View.GONE
         audioPanel.visibility = if (tool == "audio") View.VISIBLE else View.GONE
         exportPanel.visibility = if (tool == "export") View.VISIBLE else View.GONE
+        val muted = Color.rgb(176, 179, 184)
+        val accent = Color.rgb(168, 199, 250)
+        editorToolViews.forEach { (key, view) ->
+            val selected = key == tool
+            view.background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(if (selected) Color.rgb(55, 62, 74) else Color.TRANSPARENT)
+                cornerRadius = resources.displayMetrics.density * 16f
+            }
+            (view as? LinearLayout)?.let { column ->
+                if (column.childCount > 0) (column.getChildAt(0) as? View)?.invalidate()
+                if (column.childCount > 1) (column.getChildAt(1) as? TextView)?.setTextColor(if (selected) accent else muted)
+            }
+        }
     }
 
     private fun applyProfessionalTheme(view: View) {
@@ -424,10 +542,11 @@ class MainActivity : Activity() {
             is Button -> {
                 view.isAllCaps = false
                 view.textSize = 12f
+                view.typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
                 view.setTextColor(Color.WHITE)
                 view.background = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(Color.rgb(48, 48, 48))
-                    cornerRadius = resources.displayMetrics.density * 12f
+                    setColor(Color.rgb(48, 49, 52))
+                    cornerRadius = resources.displayMetrics.density * 22f
                 }
             }
             is SeekBar -> {
@@ -449,7 +568,9 @@ class MainActivity : Activity() {
         trimTimeline.setRange(trimStartMs, trimEndMs)
         val selected = (trimEndMs - trimStartMs).coerceAtLeast(0L)
         trimStartLabel.text = "MULAI  ${formatTime(trimStartMs)}"
-        trimEndLabel.text = "AKHIR  ${formatTime(trimEndMs)}   ·   DURASI ${formatTime(selected)}"
+        trimEndLabel.text = "AKHIR  ${formatTime(trimEndMs)}   ·   ${formatTime(selected)}"
+        if (::playheadLabel.isInitialized) playheadLabel.text = formatTime(previewPositionMs)
+        if (::trimTimeline.isInitialized) trimTimeline.setPlayhead(previewPositionMs)
     }
 
     private fun loadTimelineThumbnails(uri: Uri, durationMs: Long) {
@@ -570,11 +691,58 @@ class MainActivity : Activity() {
     private fun togglePreview() {
         if (videoUri == null) { statusText.text = "Pilih video terlebih dahulu untuk preview."; return }
         val player = previewPlayer
-        if (player != null) {
-            runCatching { if (player.isPlaying) { player.pause(); previewRequested = false } else { player.start(); previewRequested = true } }
+        if (player != null && previewPrepared) {
+            if (player.isPlaying) {
+                runCatching { player.pause() }
+                previewRequested = false
+                main.removeCallbacks(previewTicker)
+            } else {
+                if (previewPositionMs < trimStartMs || previewPositionMs >= trimEndMs) {
+                    previewPositionMs = trimStartMs
+                    seekPreviewTo(previewPositionMs)
+                }
+                previewRequested = true
+                runCatching { player.start() }
+                main.removeCallbacks(previewTicker)
+                main.post(previewTicker)
+            }
         } else {
             previewRequested = true
             preparePreview()
+        }
+        updatePreviewButton()
+    }
+
+    private fun updatePreviewButton() {
+        if (::previewButton.isInitialized) previewButton.text = if (previewPlayer?.isPlaying == true) "Ⅱ" else "▶"
+    }
+
+    private fun seekPreviewTo(position: Long) {
+        val target = position.coerceIn(0L, videoDurationMs)
+        previewPositionMs = target
+        if (::trimTimeline.isInitialized) trimTimeline.setPlayhead(target)
+        if (::playheadLabel.isInitialized) playheadLabel.text = formatTime(target)
+        if (previewPrepared) runCatching { previewPlayer?.seekTo(target.toInt()) }
+    }
+
+    private val previewTicker = object : Runnable {
+        override fun run() {
+            val player = previewPlayer
+            if (player != null && previewPrepared && previewRequested && runCatching { player.isPlaying }.getOrDefault(false)) {
+                val position = runCatching { player.currentPosition.toLong() }.getOrDefault(previewPositionMs)
+                previewPositionMs = position
+                if (position >= trimEndMs) {
+                    runCatching { player.pause(); player.seekTo(trimEndMs.toInt()) }
+                    previewPositionMs = trimEndMs
+                    previewRequested = false
+                    updateTrimControls()
+                    updatePreviewButton()
+                } else {
+                    if (::trimTimeline.isInitialized) trimTimeline.setPlayhead(position)
+                    if (::playheadLabel.isInitialized) playheadLabel.text = formatTime(position)
+                    main.postDelayed(this, 70L)
+                }
+            }
         }
     }
 
@@ -589,7 +757,17 @@ class MainActivity : Activity() {
             player.setDataSource(this, uri)
             player.isLooping = true
             player.setOnVideoSizeChangedListener { _, _, _ -> applyPreviewTransform() }
-            player.setOnPreparedListener { mp -> applyPreviewTransform(); if (previewRequested) mp.start() }
+            player.setOnPreparedListener { mp ->
+                previewPrepared = true
+                applyPreviewTransform()
+                mp.seekTo(previewPositionMs.toInt())
+                if (previewRequested) {
+                    mp.start()
+                    main.removeCallbacks(previewTicker)
+                    main.post(previewTicker)
+                }
+                updatePreviewButton()
+            }
             player.setOnErrorListener { _, _, _ -> statusText.text = "Preview tidak didukung decoder perangkat untuk file ini."; releasePreview(); true }
             player.prepareAsync()
         } catch (t: Throwable) {
@@ -620,7 +798,8 @@ class MainActivity : Activity() {
         runCatching { previewPlayer?.stop() }
         runCatching { previewPlayer?.release() }
         runCatching { previewSurface?.release() }
-        previewPlayer = null; previewSurface = null
+        main.removeCallbacks(previewTicker)
+        previewPlayer = null; previewSurface = null; previewPrepared = false
     }
 
     private fun updatePreviewOverlay() {
