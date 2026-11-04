@@ -12,8 +12,8 @@ android {
         // minSdk 29: MediaStore RELATIVE_PATH and ImageDecoder EXIF handling.
         minSdk = 29
         targetSdk = 35
-        versionCode = 4
-        versionName = "2.1.0"
+        versionCode = 6
+        versionName = "2.2.1"
     }
 
     buildTypes {
