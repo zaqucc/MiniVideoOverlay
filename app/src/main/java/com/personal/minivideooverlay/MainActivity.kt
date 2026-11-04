@@ -78,7 +78,7 @@ class MainActivity : Activity() {
     private lateinit var chooseMusicButton: Button
     private lateinit var exportButton: Button
     private lateinit var cancelButton: Button
-    private lateinit var previewButton: Button
+    private lateinit var previewButton: TextView
     private lateinit var previewTexture: TextureView
     private var previewPlayer: MediaPlayer? = null
     private var previewOverlayBitmap: Bitmap? = null
@@ -417,6 +417,28 @@ class MainActivity : Activity() {
         mediaPanel.visibility = if (tool == "media") View.VISIBLE else View.GONE
         audioPanel.visibility = if (tool == "audio") View.VISIBLE else View.GONE
         exportPanel.visibility = if (tool == "export") View.VISIBLE else View.GONE
+    }
+
+    private fun applyProfessionalTheme(view: View) {
+        when (view) {
+            is Button -> {
+                view.isAllCaps = false
+                view.textSize = 12f
+                view.setTextColor(Color.WHITE)
+                view.background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(Color.rgb(48, 48, 48))
+                    cornerRadius = resources.displayMetrics.density * 12f
+                }
+            }
+            is SeekBar -> {
+                view.progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(65, 132, 245))
+                view.thumbTintList = android.content.res.ColorStateList.valueOf(Color.rgb(65, 132, 245))
+                view.progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(72, 72, 72))
+            }
+        }
+        if (view is android.view.ViewGroup) {
+            for (index in 0 until view.childCount) applyProfessionalTheme(view.getChildAt(index))
+        }
     }
 
     private fun updateTrimControls() {
