@@ -31,6 +31,7 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.TextView
+import java.util.concurrent.Executors
 import android.widget.ScrollView
 
 class MainActivity : Activity() {
@@ -96,8 +97,9 @@ class MainActivity : Activity() {
     private var videoDurationMs = 0L
     private var trimStartMs = 0L
     private var trimEndMs = 0L
-    private lateinit var trimStartSeek: SeekBar
-    private lateinit var trimEndSeek: SeekBar
+    private lateinit var trimTimeline: RangeTrimTimelineView
+    private val thumbnailExecutor = Executors.newSingleThreadExecutor()
+    private var thumbnailLoadToken = 0
     private lateinit var trimStartLabel: TextView
     private lateinit var trimEndLabel: TextView
 
@@ -123,6 +125,7 @@ class MainActivity : Activity() {
         ExportServiceState.outputUri?.let { lastOutputUri = Uri.parse(it) }
         refreshUi()
         updateTrimControls()
+        videoUri?.let { loadTimelineThumbnails(it, videoDurationMs) }
         if (ExportServiceState.outputUri != null) { playOutputButton.visibility = View.VISIBLE; shareOutputButton.visibility = View.VISIBLE }
         else if (!ExportServiceState.isRunning) getSharedPreferences("mvo_export_state", MODE_PRIVATE).getString("last_error", null)?.let { statusText.text = it }
         if (ExportServiceState.isRunning) { progress.visibility = View.VISIBLE; progress.progress = ExportServiceState.progress; statusText.text = ExportServiceState.message }
@@ -157,6 +160,9 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         releasePreview()
         clearPreviewOverlay()
+        thumbnailLoadToken++
+        thumbnailExecutor.shutdownNow()
+        if (::trimTimeline.isInitialized) trimTimeline.releaseThumbnails()
         super.onDestroy()
     }
 
@@ -183,6 +189,7 @@ class MainActivity : Activity() {
                 videoUri = chosenUri; releasePreview(); previewRequested = false
                 videoDurationMs = readDurationMs(chosenUri)
                 trimStartMs = 0L; trimEndMs = videoDurationMs
+                loadTimelineThumbnails(chosenUri, videoDurationMs)
             }
             REQ_PNG -> {
                 // Simpan URI segera setelah pengguna memilih file. Validasi tidak boleh
@@ -223,37 +230,21 @@ class MainActivity : Activity() {
 
         root.addView(section("POTONG VIDEO", dp(20)))
         trimStartLabel = label()
-        trimStartLabel.text = "Mulai: 00:00"
-        root.addView(trimStartLabel, margin(dp(4)))
-        trimStartSeek = SeekBar(this).apply {
-            max = 1000
-            progress = 0
-            setOnSeekBarChangeListener(seekListener { value ->
-                if (videoDurationMs > 0L) {
-                    val proposed = videoDurationMs * value / 1000L
-                    trimStartMs = proposed.coerceAtMost((trimEndMs - MIN_TRIM_MS).coerceAtLeast(0L))
-                    updateTrimControls()
-                }
-            })
-        }
-        root.addView(trimStartSeek)
         trimEndLabel = label()
-        trimEndLabel.text = "Selesai: --:--"
-        root.addView(trimEndLabel, margin(dp(8)))
-        trimEndSeek = SeekBar(this).apply {
-            max = 1000
-            progress = 1000
-            setOnSeekBarChangeListener(seekListener { value ->
-                if (videoDurationMs > 0L) {
-                    val proposed = videoDurationMs * value / 1000L
-                    trimEndMs = proposed.coerceAtLeast((trimStartMs + MIN_TRIM_MS).coerceAtMost(videoDurationMs))
-                    updateTrimControls()
-                }
-            })
+        trimTimeline = RangeTrimTimelineView(this).apply {
+            setVideoDuration(videoDurationMs)
+            setRange(trimStartMs, trimEndMs)
+            onRangeChanged = { start, end ->
+                trimStartMs = start
+                trimEndMs = end
+                updateTrimControls()
+            }
         }
-        root.addView(trimEndSeek)
+        root.addView(trimTimeline, LinearLayout.LayoutParams(-1, dp(116)).apply { topMargin = dp(8) })
+        root.addView(trimStartLabel, margin(dp(4)))
+        root.addView(trimEndLabel, margin(dp(2)))
         root.addView(TextView(this).apply {
-            text = "Atur titik awal dan akhir. Bagian di luar rentang tidak akan masuk ke video hasil ekspor."
+            text = "Geser pegangan kiri dan kanan pada timeline untuk memilih bagian video yang ingin dipertahankan."
             textSize = 12f; setTextColor(Color.rgb(153, 166, 184))
         }, margin(dp(2)))
 
@@ -334,16 +325,48 @@ class MainActivity : Activity() {
     }
 
     private fun updateTrimControls() {
-        if (!::trimStartSeek.isInitialized || !::trimEndSeek.isInitialized) return
+        if (!::trimTimeline.isInitialized) return
         val duration = videoDurationMs
-        val hasDuration = duration > MIN_TRIM_MS
-        trimStartSeek.isEnabled = hasDuration && !ExportServiceState.isRunning
-        trimEndSeek.isEnabled = hasDuration && !ExportServiceState.isRunning
-        trimStartSeek.progress = if (duration > 0L) (trimStartMs * 1000L / duration).toInt().coerceIn(0, 1000) else 0
-        trimEndSeek.progress = if (duration > 0L) (trimEndMs * 1000L / duration).toInt().coerceIn(0, 1000) else 1000
+        trimTimeline.isEnabled = duration > MIN_TRIM_MS && !ExportServiceState.isRunning
+        trimTimeline.setVideoDuration(duration)
+        trimTimeline.setRange(trimStartMs, trimEndMs)
         val selected = (trimEndMs - trimStartMs).coerceAtLeast(0L)
         trimStartLabel.text = "MULAI  ${formatTime(trimStartMs)}"
         trimEndLabel.text = "AKHIR  ${formatTime(trimEndMs)}   ·   DURASI ${formatTime(selected)}"
+    }
+
+    private fun loadTimelineThumbnails(uri: Uri, durationMs: Long) {
+        val token = ++thumbnailLoadToken
+        if (::trimTimeline.isInitialized) trimTimeline.releaseThumbnails()
+        if (durationMs <= 0L) return
+        thumbnailExecutor.execute {
+            val frames = mutableListOf<Bitmap>()
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(this, uri)
+                for (index in 0 until 8) {
+                    val timeUs = (durationMs * (index + 0.5) / 8.0 * 1000.0).toLong()
+                    val frame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    if (frame != null) {
+                        val scaled = Bitmap.createScaledBitmap(frame, 180, 100, true)
+                        if (scaled !== frame) frame.recycle()
+                        frames.add(scaled)
+                    }
+                }
+            } catch (_: Throwable) {
+                frames.forEach { if (!it.isRecycled) it.recycle() }
+                frames.clear()
+            } finally {
+                runCatching { retriever.release() }
+            }
+            main.post {
+                if (token == thumbnailLoadToken && !isFinishing && ::trimTimeline.isInitialized) {
+                    trimTimeline.setThumbnails(frames)
+                } else {
+                    frames.forEach { if (!it.isRecycled) it.recycle() }
+                }
+            }
+        }
     }
 
     private fun formatTime(milliseconds: Long): String {
