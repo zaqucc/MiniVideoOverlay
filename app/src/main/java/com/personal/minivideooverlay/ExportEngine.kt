@@ -308,8 +308,9 @@ class ExportEngine(private val appContext: Context) {
 
     private fun decodeFullCanvasPng(uri: Uri): Bitmap {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        appContext.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            ?: throw ExportException("File PNG tidak dapat dibuka.")
+        val boundsStream = appContext.contentResolver.openInputStream(uri)
+            ?: throw ExportException("File PNG tidak dapat dibuka. Periksa izin akses file lalu pilih ulang PNG.")
+        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw ExportException("PNG tidak valid atau tidak dapat didekode.")
         if (bounds.outWidth > 12_000 || bounds.outHeight > 12_000) {
             throw ExportException("Dimensi PNG terlalu besar; maksimum 12000×12000.")
