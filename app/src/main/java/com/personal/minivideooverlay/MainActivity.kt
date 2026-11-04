@@ -2,6 +2,10 @@ package com.personal.minivideooverlay
 
 import android.app.Activity
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
+import android.os.Build
 import android.content.ContentUris
 import android.graphics.BitmapFactory
 import android.graphics.Bitmap
@@ -33,7 +37,30 @@ class MainActivity : Activity() {
     private var videoUri: Uri? = null
     private var pngUri: Uri? = null
     private var musicUri: Uri? = null
-    private var engine: ExportEngine? = null
+    private var exportReceiverRegistered = false
+    private val exportReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                ExportService.ACTION_PROGRESS -> {
+                    progress.visibility = View.VISIBLE
+                    progress.progress = intent.getIntExtra(ExportService.EXTRA_PROGRESS, 0)
+                    statusText.text = intent.getStringExtra(ExportService.EXTRA_MESSAGE) ?: "Rendering…"
+                }
+                ExportService.ACTION_FINISHED -> {
+                    lastOutputUri = intent.getStringExtra(ExportService.EXTRA_OUTPUT)?.let(Uri::parse)
+                    progress.progress = 100; progress.visibility = View.VISIBLE
+                    statusText.text = "Selesai: ${intent.getStringExtra(ExportService.EXTRA_FILENAME) ?: "Video tersimpan"}\nLokasi: Movies/MiniVideoOverlay"
+                    playOutputButton.visibility = View.VISIBLE; shareOutputButton.visibility = View.VISIBLE
+                    refreshUi()
+                }
+                ExportService.ACTION_FAILED -> {
+                    statusText.text = intent.getStringExtra(ExportService.EXTRA_MESSAGE) ?: "Ekspor gagal."
+                    refreshUi()
+                }
+                ExportService.ACTION_STATE_CHANGED -> refreshUi()
+            }
+        }
+    }
     private var lastOutputUri: Uri? = null
     private val main = Handler(Looper.getMainLooper())
 
@@ -73,8 +100,33 @@ class MainActivity : Activity() {
             musicVolume = it.getInt(KEY_MUSIC_VOL, 100)
         }
         setContentView(buildUi())
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 2402)
+        }
         cleanupStalePendingOutputs()
+        ExportServiceState.outputUri = ExportServiceState.outputUri ?: getSharedPreferences("mvo_export_state", MODE_PRIVATE).getString("last_output_uri", null)
+        ExportServiceState.outputUri?.let { lastOutputUri = Uri.parse(it) }
         refreshUi()
+        if (ExportServiceState.outputUri != null) { playOutputButton.visibility = View.VISIBLE; shareOutputButton.visibility = View.VISIBLE }
+        else if (!ExportServiceState.isRunning) getSharedPreferences("mvo_export_state", MODE_PRIVATE).getString("last_error", null)?.let { statusText.text = it }
+        if (ExportServiceState.isRunning) { progress.visibility = View.VISIBLE; progress.progress = ExportServiceState.progress; statusText.text = ExportServiceState.message }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val filter = IntentFilter().apply { addAction(ExportService.ACTION_PROGRESS); addAction(ExportService.ACTION_FINISHED); addAction(ExportService.ACTION_FAILED); addAction(ExportService.ACTION_STATE_CHANGED) }
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(exportReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(exportReceiver, filter)
+        }
+        exportReceiverRegistered = true
+    }
+
+    override fun onStop() {
+        if (exportReceiverRegistered) { unregisterReceiver(exportReceiver); exportReceiverRegistered = false }
+        super.onStop()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -86,7 +138,6 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        if (isFinishing) engine?.cancel()
         releasePreview()
         super.onDestroy()
     }
@@ -160,7 +211,7 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply { text = "Ekspor Full HD dapat menggunakan baterai dan membuat perangkat hangat."; textSize = 12f; setTextColor(Color.DKGRAY) }, margin(dp(2)))
         exportButton = Button(this).apply { text = "Ekspor Video"; setOnClickListener { startExport() } }
         root.addView(exportButton, margin(dp(10)))
-        cancelButton = Button(this).apply { text = "Batalkan Ekspor"; visibility = View.GONE; setOnClickListener { engine?.cancel(); statusText.text = "Permintaan pembatalan dikirim…" } }
+        cancelButton = Button(this).apply { text = "Batalkan Ekspor"; visibility = View.GONE; setOnClickListener { startService(Intent(this, ExportService::class.java).setAction(ExportService.ACTION_CANCEL)); statusText.text = "Permintaan pembatalan dikirim…" } }
         root.addView(cancelButton)
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; visibility = View.GONE }
         root.addView(progress, margin(dp(8)))
@@ -214,27 +265,28 @@ class MainActivity : Activity() {
     private fun startExport() {
         val video = videoUri ?: return
         val png = pngUri ?: return
-        if (engine != null) return
-        val job = ExportEngine(applicationContext); engine = job
-        lastOutputUri = null; playOutputButton.visibility = View.GONE; shareOutputButton.visibility = View.GONE
+        if (ExportServiceState.isRunning) return
+        val intent = Intent(this, ExportService::class.java).apply {
+            action = ExportService.ACTION_START
+            putExtra(ExportService.EXTRA_VIDEO, video.toString())
+            putExtra(ExportService.EXTRA_PNG, png.toString())
+            putExtra(ExportService.EXTRA_MUSIC, musicUri?.toString())
+            putExtra(ExportService.EXTRA_VIDEO_VOLUME, videoVolume)
+            putExtra(ExportService.EXTRA_MUSIC_VOLUME, musicVolume)
+        }
+        lastOutputUri = null
+        playOutputButton.visibility = View.GONE; shareOutputButton.visibility = View.GONE
         progress.progress = 0; progress.visibility = View.VISIBLE
-        statusText.text = "Memulai ekspor…"; refreshUi()
-        Thread({
-            try {
-                val result = job.export(video, png, musicUri, videoVolume, musicVolume) { pct, message ->
-                    main.post { if (engine === job) { progress.progress = pct; statusText.text = message } }
-                }
-                main.post {
-                    lastOutputUri = result.uri
-                    statusText.text = "Selesai: ${result.fileName}\nLokasi: Movies/MiniVideoOverlay" + if (result.hasAudio) "" else "\nCatatan: output tidak memiliki track audio."
-                    playOutputButton.visibility = View.VISIBLE; shareOutputButton.visibility = View.VISIBLE
-                }
-            } catch (e: Throwable) {
-                main.post { statusText.text = if (e is ExportException) e.message else "Ekspor gagal: ${e.message ?: e.javaClass.simpleName}" }
-            } finally {
-                main.post { if (engine === job) engine = null; refreshUi() }
-            }
-        }, "mvo-export-worker").start()
+        statusText.text = "Ekspor berjalan di latar belakang. Kamu boleh berpindah aplikasi; pantau notifikasi MiniVideoOverlay."
+        ExportServiceState.isRunning = true
+        refreshUi()
+        try {
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+        } catch (error: Throwable) {
+            ExportServiceState.isRunning = false
+            statusText.text = "Tidak dapat memulai layanan ekspor: ${error.message ?: error.javaClass.simpleName}"
+            refreshUi()
+        }
     }
 
     private fun togglePreview() {
@@ -315,7 +367,7 @@ class MainActivity : Activity() {
     }
 
     private fun refreshUi() {
-        val busy = engine != null
+        val busy = ExportServiceState.isRunning
         videoLabel.text = "Video: ${videoUri?.let { displayName(it) + " • " + mediaDuration(it) } ?: "Belum dipilih"}"
         pngLabel.text = "PNG: ${pngUri?.let { displayName(it) } ?: "Belum dipilih"}"
         musicLabel.text = "Musik: ${musicUri?.let { displayName(it) + " • " + mediaDuration(it) } ?: "Tidak dipilih (opsional)"}"
@@ -327,7 +379,7 @@ class MainActivity : Activity() {
         exportButton.isEnabled = !busy && videoUri != null && pngUri != null
         cancelButton.visibility = if (busy) View.VISIBLE else View.GONE
         previewButton.isEnabled = !busy
-        if (!busy) progress.visibility = if (progress.progress == 100) View.VISIBLE else View.GONE
+        if (!busy && progress.progress < 100) progress.visibility = View.GONE
     }
 
     private fun displayName(uri: Uri): String = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
