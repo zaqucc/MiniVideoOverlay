@@ -89,6 +89,13 @@ class MainActivity : Activity() {
     private lateinit var shareOutputButton: Button
     private var videoVolume = 100
     private var musicVolume = 100
+    private var videoDurationMs = 0L
+    private var trimStartMs = 0L
+    private var trimEndMs = 0L
+    private lateinit var trimStartSeek: SeekBar
+    private lateinit var trimEndSeek: SeekBar
+    private lateinit var trimStartLabel: TextView
+    private lateinit var trimEndLabel: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -98,6 +105,8 @@ class MainActivity : Activity() {
             musicUris.clear(); musicUris.addAll(it.getStringArrayList(KEY_MUSIC_LIST)?.map(Uri::parse) ?: emptyList())
             videoVolume = it.getInt(KEY_VIDEO_VOL, 100)
             musicVolume = it.getInt(KEY_MUSIC_VOL, 100)
+            trimStartMs = it.getLong(KEY_TRIM_START, 0L)
+            trimEndMs = it.getLong(KEY_TRIM_END, 0L)
         }
         setContentView(buildUi())
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -107,6 +116,7 @@ class MainActivity : Activity() {
         ExportServiceState.outputUri = ExportServiceState.outputUri ?: getSharedPreferences("mvo_export_state", MODE_PRIVATE).getString("last_output_uri", null)
         ExportServiceState.outputUri?.let { lastOutputUri = Uri.parse(it) }
         refreshUi()
+        updateTrimControls()
         if (ExportServiceState.outputUri != null) { playOutputButton.visibility = View.VISIBLE; shareOutputButton.visibility = View.VISIBLE }
         else if (!ExportServiceState.isRunning) getSharedPreferences("mvo_export_state", MODE_PRIVATE).getString("last_error", null)?.let { statusText.text = it }
         if (ExportServiceState.isRunning) { progress.visibility = View.VISIBLE; progress.progress = ExportServiceState.progress; statusText.text = ExportServiceState.message }
@@ -135,6 +145,7 @@ class MainActivity : Activity() {
         pngUri?.let { outState.putString(KEY_PNG, it.toString()) }
         outState.putStringArrayList(KEY_MUSIC_LIST, ArrayList(musicUris.map { it.toString() }))
         outState.putInt(KEY_VIDEO_VOL, videoVolume); outState.putInt(KEY_MUSIC_VOL, musicVolume)
+        outState.putLong(KEY_TRIM_START, trimStartMs); outState.putLong(KEY_TRIM_END, trimEndMs)
     }
 
     override fun onDestroy() {
@@ -161,7 +172,11 @@ class MainActivity : Activity() {
         val chosenUri = uri ?: return
         runCatching { contentResolver.takePersistableUriPermission(chosenUri, flags and Intent.FLAG_GRANT_READ_URI_PERMISSION) }
         when (requestCode) {
-            REQ_VIDEO -> { videoUri = chosenUri; releasePreview(); previewRequested = false }
+            REQ_VIDEO -> {
+                videoUri = chosenUri; releasePreview(); previewRequested = false
+                videoDurationMs = readDurationMs(chosenUri)
+                trimStartMs = 0L; trimEndMs = videoDurationMs
+            }
             REQ_PNG -> {
                 // Simpan URI segera setelah pengguna memilih file. Validasi tidak boleh
                 // membatalkan pilihan, karena beberapa document provider menghasilkan
@@ -179,9 +194,9 @@ class MainActivity : Activity() {
     private fun buildUi(): View {
         val d = resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(12), dp(16), dp(24)); setBackgroundColor(Color.rgb(247, 248, 250)) }
-        root.addView(TextView(this).apply { text = "MiniVideoOverlay"; textSize = 25f; setTextColor(Color.rgb(20, 28, 40)); setTypeface(null, android.graphics.Typeface.BOLD) })
-        root.addView(TextView(this).apply { text = "Compositor video 16:9 • 1920 × 1080"; textSize = 13f; setTextColor(Color.DKGRAY) }, margin(dp(2)))
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(18), dp(18), dp(28)); setBackgroundColor(Color.rgb(11, 18, 32)) }
+        root.addView(TextView(this).apply { text = "MINIVIDEOOVERLAY"; textSize = 22f; letterSpacing = 0.08f; setTextColor(Color.WHITE); setTypeface(null, android.graphics.Typeface.BOLD) })
+        root.addView(TextView(this).apply { text = "VIDEO COMPOSER  ·  FULL HD"; textSize = 11f; letterSpacing = 0.12f; setTextColor(Color.rgb(117, 143, 170)) }, margin(dp(4)))
 
         previewFrame = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         previewTexture = TextureView(this).apply {
@@ -198,6 +213,42 @@ class MainActivity : Activity() {
         root.addView(previewFrame, LinearLayout.LayoutParams(-1, dp(190)).apply { topMargin = dp(14) })
         previewButton = Button(this).apply { text = "Preview / Putar-Pause"; setOnClickListener { togglePreview() } }
         root.addView(previewButton, margin(dp(4)))
+
+        root.addView(section("POTONG VIDEO", dp(20)))
+        trimStartLabel = label()
+        trimStartLabel.text = "Mulai: 00:00"
+        root.addView(trimStartLabel, margin(dp(4)))
+        trimStartSeek = SeekBar(this).apply {
+            max = 1000
+            progress = 0
+            setOnSeekBarChangeListener(seekListener { value ->
+                if (videoDurationMs > 0L) {
+                    val proposed = videoDurationMs * value / 1000L
+                    trimStartMs = proposed.coerceAtMost((trimEndMs - MIN_TRIM_MS).coerceAtLeast(0L))
+                    updateTrimControls()
+                }
+            })
+        }
+        root.addView(trimStartSeek)
+        trimEndLabel = label()
+        trimEndLabel.text = "Selesai: --:--"
+        root.addView(trimEndLabel, margin(dp(8)))
+        trimEndSeek = SeekBar(this).apply {
+            max = 1000
+            progress = 1000
+            setOnSeekBarChangeListener(seekListener { value ->
+                if (videoDurationMs > 0L) {
+                    val proposed = videoDurationMs * value / 1000L
+                    trimEndMs = proposed.coerceAtLeast((trimStartMs + MIN_TRIM_MS).coerceAtMost(videoDurationMs))
+                    updateTrimControls()
+                }
+            })
+        }
+        root.addView(trimEndSeek)
+        root.addView(TextView(this).apply {
+            text = "Atur titik awal dan akhir. Bagian di luar rentang tidak akan masuk ke video hasil ekspor."
+            textSize = 12f; setTextColor(Color.rgb(153, 166, 184))
+        }, margin(dp(2)))
 
         root.addView(section("INPUT MEDIA", dp(16)))
         chooseVideoButton = Button(this).apply { text = "Pilih Video Utama"; setOnClickListener { pickFile(REQ_VIDEO, "video/*") } }
@@ -231,15 +282,71 @@ class MainActivity : Activity() {
         shareOutputButton = Button(this).apply { text = "Bagikan Hasil"; visibility = View.GONE; setOnClickListener { lastOutputUri?.let { shareOutput(it) } } }
         root.addView(playOutputButton, margin(dp(6))); root.addView(shareOutputButton)
 
-        val scroll = ScrollView(this).apply { isFillViewport = true; addView(root) }
+        val scroll = ScrollView(this).apply { isFillViewport = true; setBackgroundColor(Color.rgb(11, 18, 32)); addView(root) }
+        applyProfessionalTheme(root)
         return scroll
     }
 
     private fun section(text: String, top: Int) = TextView(this).apply {
-        this.text = text; textSize = 12f; setTextColor(Color.rgb(95, 105, 120)); setTypeface(null, android.graphics.Typeface.BOLD)
-        setPadding(0, top, 0, 4)
+        this.text = text; textSize = 11f; letterSpacing = 0.10f; setTextColor(Color.rgb(111, 190, 225)); setTypeface(null, android.graphics.Typeface.BOLD)
+        setPadding(0, top, 0, 6)
     }
-    private fun label() = TextView(this).apply { textSize = 12f; setTextColor(Color.DKGRAY) }
+    private fun label() = TextView(this).apply { textSize = 12f; setTextColor(Color.rgb(204, 215, 228)) }
+
+    private fun applyProfessionalTheme(view: View) {
+        when (view) {
+            is Button -> {
+                view.isAllCaps = false
+                view.textSize = 13f
+                view.setTextColor(Color.WHITE)
+                view.background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(if (view === exportButton) Color.rgb(36, 126, 190) else Color.rgb(30, 43, 62))
+                    cornerRadius = resources.displayMetrics.density * 12f
+                }
+                view.setPadding(view.paddingLeft, view.paddingTop + 3, view.paddingRight, view.paddingBottom + 3)
+            }
+            is SeekBar -> {
+                view.progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(76, 201, 240))
+                view.thumbTintList = android.content.res.ColorStateList.valueOf(Color.rgb(76, 201, 240))
+                view.progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(48, 64, 84))
+            }
+            is ProgressBar -> {
+                view.progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(76, 201, 240))
+            }
+            is TextView -> {
+                if (view.textColors.defaultColor == Color.BLACK || view.textColors.defaultColor == Color.DKGRAY) {
+                    view.setTextColor(Color.rgb(204, 215, 228))
+                }
+            }
+        }
+        if (view is android.view.ViewGroup) {
+            for (index in 0 until view.childCount) applyProfessionalTheme(view.getChildAt(index))
+        }
+    }
+
+    private fun updateTrimControls() {
+        if (!::trimStartSeek.isInitialized || !::trimEndSeek.isInitialized) return
+        val duration = videoDurationMs
+        val hasDuration = duration > MIN_TRIM_MS
+        trimStartSeek.isEnabled = hasDuration && !ExportServiceState.isRunning
+        trimEndSeek.isEnabled = hasDuration && !ExportServiceState.isRunning
+        trimStartSeek.progress = if (duration > 0L) (trimStartMs * 1000L / duration).toInt().coerceIn(0, 1000) else 0
+        trimEndSeek.progress = if (duration > 0L) (trimEndMs * 1000L / duration).toInt().coerceIn(0, 1000) else 1000
+        val selected = (trimEndMs - trimStartMs).coerceAtLeast(0L)
+        trimStartLabel.text = "MULAI  ${formatTime(trimStartMs)}"
+        trimEndLabel.text = "AKHIR  ${formatTime(trimEndMs)}   ·   DURASI ${formatTime(selected)}"
+    }
+
+    private fun formatTime(milliseconds: Long): String {
+        val totalSeconds = milliseconds.coerceAtLeast(0L) / 1000L
+        return "%02d:%02d:%02d".format(totalSeconds / 3600L, (totalSeconds / 60L) % 60L, totalSeconds % 60L)
+    }
+
+    private fun readDurationMs(uri: Uri): Long = runCatching {
+        val retriever = MediaMetadataRetriever()
+        try { retriever.setDataSource(this, uri); retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L }
+        finally { retriever.release() }
+    }.getOrDefault(0L)
     private fun margin(top: Int) = LinearLayout.LayoutParams(-1, -2).apply { topMargin = top }
     private fun seekListener(changed: (Int) -> Unit) = object : SeekBar.OnSeekBarChangeListener {
         override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) { changed(value) }
@@ -293,6 +400,8 @@ class MainActivity : Activity() {
             putStringArrayListExtra(ExportService.EXTRA_MUSIC_LIST, ArrayList(musicUris.map { it.toString() }))
             putExtra(ExportService.EXTRA_VIDEO_VOLUME, videoVolume)
             putExtra(ExportService.EXTRA_MUSIC_VOLUME, musicVolume)
+            putExtra(ExportService.EXTRA_TRIM_START_MS, trimStartMs)
+            putExtra(ExportService.EXTRA_TRIM_END_MS, trimEndMs.takeIf { it > 0L } ?: videoDurationMs)
         }
         lastOutputUri = null
         playOutputButton.visibility = View.GONE; shareOutputButton.visibility = View.GONE
@@ -396,6 +505,7 @@ class MainActivity : Activity() {
         choosePngButton.isEnabled = !busy
         chooseMusicButton.isEnabled = !busy
         videoSeek.isEnabled = !busy; musicSeek.isEnabled = !busy
+        updateTrimControls()
         exportButton.isEnabled = !busy && videoUri != null && pngUri != null
         cancelButton.visibility = if (busy) View.VISIBLE else View.GONE
         previewButton.isEnabled = !busy
@@ -444,5 +554,7 @@ class MainActivity : Activity() {
         private const val REQ_VIDEO = 1001; private const val REQ_PNG = 1002; private const val REQ_MUSIC = 1003
         private const val KEY_VIDEO = "video_uri"; private const val KEY_PNG = "png_uri"; private const val KEY_MUSIC_LIST = "music_uri_list"
         private const val KEY_VIDEO_VOL = "video_volume"; private const val KEY_MUSIC_VOL = "music_volume"
+        private const val KEY_TRIM_START = "trim_start_ms"; private const val KEY_TRIM_END = "trim_end_ms"
+        private const val MIN_TRIM_MS = 500L
     }
 }
