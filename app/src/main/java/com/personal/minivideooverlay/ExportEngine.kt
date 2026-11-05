@@ -69,6 +69,7 @@ class ExportEngine(private val appContext: Context) {
         musicVolume: Int,
         trimStartMs: Long,
         trimEndMs: Long,
+        videoZoom: Float = 1.08f,
         onProgress: (Int, String) -> Unit
     ): Result {
         state = ExportState.Validating
@@ -93,6 +94,7 @@ class ExportEngine(private val appContext: Context) {
                 trimStartMs = trimStartMs,
                 trimEndMs = trimEndMs,
                 overlayBitmap = overlayBitmap,
+                videoZoom = videoZoom,
                 musicUris = if (musicVolume > 0) normalizedMusic else emptyList(),
                 includeVideoAudio = hasVideoAudio,
                 videoGain = videoVolume.coerceIn(0, 100) / 100f,
@@ -152,6 +154,7 @@ class ExportEngine(private val appContext: Context) {
         trimStartMs: Long,
         trimEndMs: Long,
         overlayBitmap: Bitmap,
+        videoZoom: Float,
         musicUris: List<Uri>,
         includeVideoAudio: Boolean,
         videoGain: Float,
@@ -165,7 +168,7 @@ class ExportEngine(private val appContext: Context) {
                 Presentation.LAYOUT_SCALE_TO_FIT
             ),
             ScaleAndRotateTransformation.Builder()
-                .setScale(1.08f, 1.08f)
+                .setScale(videoZoom.coerceIn(0.80f, 1.30f), videoZoom.coerceIn(0.80f, 1.30f))
                 .build(),
             // Keep the PNG overlay last so its size and position are unaffected by video zoom.
             OverlayEffect(
