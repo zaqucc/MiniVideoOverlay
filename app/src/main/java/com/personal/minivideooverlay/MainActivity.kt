@@ -268,7 +268,7 @@ class MainActivity : Activity() {
             gravity = android.view.Gravity.CENTER_VERTICAL
         }
         val heading = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        heading.addView(text("MOTIONIX", 12f, muted, true))
+        heading.addView(text("MotionIN", 12f, muted, true))
         heading.addView(text("Edit video", 21f, white, true), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(3) })
         topBar.addView(heading, LinearLayout.LayoutParams(0, -2, 1f))
         exportButton = actionButton("Simpan", true) { startExport() }
@@ -784,7 +784,7 @@ class MainActivity : Activity() {
         val sw = player.videoWidth.toFloat(); val sh = player.videoHeight.toFloat()
         if (sw <= 0f || sh <= 0f) return
         val renderedHeightRatio = (vw / sw * sh) / vh
-        val matrix = Matrix().apply { setScale(1f, renderedHeightRatio, vw / 2f, vh / 2f) }
+        val matrix = Matrix().apply { setScale(1.08f, renderedHeightRatio * 1.08f, vw / 2f, vh / 2f) }
         previewTexture.setTransform(matrix)
     }
 
