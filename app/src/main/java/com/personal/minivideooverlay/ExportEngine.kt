@@ -158,14 +158,16 @@ class ExportEngine(private val appContext: Context) {
         musicGain: Float
     ): Composition {
         val videoEffects = listOf(
-            ScaleAndRotateTransformation.Builder()
-                .setScale(1.08f, 1.08f)
-                .build(),
+            // Establish the output canvas first, then zoom only the video content.
             Presentation.createForWidthAndHeight(
                 OverlayConfig.OUTPUT_WIDTH,
                 OverlayConfig.OUTPUT_HEIGHT,
                 Presentation.LAYOUT_SCALE_TO_FIT
             ),
+            ScaleAndRotateTransformation.Builder()
+                .setScale(1.08f, 1.08f)
+                .build(),
+            // Keep the PNG overlay last so its size and position are unaffected by video zoom.
             OverlayEffect(
                 listOf(
                     BitmapOverlay.createStaticBitmapOverlay(overlayBitmap)
