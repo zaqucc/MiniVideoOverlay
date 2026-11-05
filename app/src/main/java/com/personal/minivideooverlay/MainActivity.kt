@@ -155,7 +155,7 @@ class MainActivity : Activity() {
     private fun buildUi(): View {
         val density = resources.displayMetrics.density
         fun dp(v: Int) = (v * density).toInt()
-        val background = Color.rgb(15, 18, 23)
+        val backgroundColor = Color.rgb(15, 18, 23)
         val card = Color.rgb(26, 32, 41)
         val accent = Color.rgb(154, 190, 232)
         fun label(value: String, size: Float = 14f, color: Int = Color.WHITE, bold: Boolean = false) =
@@ -195,7 +195,7 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(20), dp(18), dp(28))
-            setBackgroundColor(background)
+            setBackgroundColor(backgroundColor)
         }
         root.addView(label("MotionIN", 24f, Color.WHITE, true))
         root.addView(label("Video editor", 13f, Color.LTGRAY).apply {
@@ -210,7 +210,7 @@ class MainActivity : Activity() {
             setHint("00:00:00")
             textSize = 18f
             inputType = InputType.TYPE_CLASS_DATETIME or InputType.TYPE_DATETIME_VARIATION_TIME
-            singleLine = true
+            isSingleLine = true
             setText("00:00:00")
             setPadding(dp(12), dp(10), dp(12), dp(10))
             background = android.graphics.drawable.GradientDrawable().apply {
