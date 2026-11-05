@@ -26,6 +26,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
+import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
@@ -164,6 +165,9 @@ class ExportEngine(private val appContext: Context) {
         musicGain: Float
     ): Composition {
         val videoEffects = listOf(
+            ScaleAndRotateTransformation.Builder()
+                .setScale(1.08f, 1.08f)
+                .build(),
             Presentation.createForWidthAndHeight(
                 OverlayConfig.OUTPUT_WIDTH,
                 OverlayConfig.OUTPUT_HEIGHT,
@@ -171,8 +175,7 @@ class ExportEngine(private val appContext: Context) {
             ),
             OverlayEffect(
                 listOf(
-                    BitmapOverlay.createStaticBitmapOverlay(overlayBitmap),
-                    MusicPopupOverlay(cues)
+                    BitmapOverlay.createStaticBitmapOverlay(overlayBitmap)
                 )
             )
         )
