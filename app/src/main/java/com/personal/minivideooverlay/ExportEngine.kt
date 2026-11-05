@@ -379,7 +379,7 @@ class ExportEngine(private val appContext: Context) {
                 val mime = format.getString(android.media.MediaFormat.KEY_MIME).orEmpty()
                 if (mime.startsWith("video/") && format.containsKey(android.media.MediaFormat.KEY_FRAME_RATE)) {
                     runCatching {
-                        format.getNumber(android.media.MediaFormat.KEY_FRAME_RATE).toFloat()
+                        format.getNumber(android.media.MediaFormat.KEY_FRAME_RATE)?.toFloat() ?: 30f
                     }.getOrNull()
                 } else null
             } ?: 30f
