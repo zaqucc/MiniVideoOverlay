@@ -165,7 +165,7 @@ class ExportEngine(private val appContext: Context) {
                 Presentation.LAYOUT_SCALE_TO_FIT
             ),
             ScaleAndRotateTransformation.Builder()
-                .setScale(1.16f, 1.16f)
+                .setScale(1.08f, 1.08f)
                 .build(),
             // Keep the PNG overlay last so its size and position are unaffected by video zoom.
             OverlayEffect(
