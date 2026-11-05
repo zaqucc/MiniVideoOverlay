@@ -79,17 +79,14 @@ class ExportEngine(private val appContext: Context) {
         var outputUri: Uri? = null
         var tempOutputFile: File? = null
         var published = false
-        val fileName = "MiniVideoOverlay_${SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())}.mp4"
+        val fileName = "MotionIN_${SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())}.mp4"
         try {
             checkCancelled()
             onProgress(1, "Memvalidasi sumber media…")
             overlayBitmap = decodeFullCanvasPng(pngUri)
             val hasVideoAudio = videoVolume > 0 && hasAudioTrack(videoUri)
             // Preserve the exact playlist order, including repeated selections of the same URI.
-            val normalizedMusic = musicUris.toList()
-            val cues = if (normalizedMusic.isNotEmpty()) {
-                MusicMetadataReader(appContext).read(normalizedMusic)
-            } else emptyList()
+            val normalizedMusic = musicUris.take(4)
             checkCancelled()
 
             state = ExportState.Preparing
@@ -100,7 +97,6 @@ class ExportEngine(private val appContext: Context) {
                 trimEndMs = trimEndMs,
                 overlayBitmap = overlayBitmap,
                 musicUris = if (musicVolume > 0) normalizedMusic else emptyList(),
-                cues = cues,
                 includeVideoAudio = hasVideoAudio,
                 videoGain = videoVolume.coerceIn(0, 100) / 100f,
                 musicGain = musicVolume.coerceIn(0, 100) / 100f
@@ -159,7 +155,6 @@ class ExportEngine(private val appContext: Context) {
         trimEndMs: Long,
         overlayBitmap: Bitmap,
         musicUris: List<Uri>,
-        cues: List<MusicTrackCue>,
         includeVideoAudio: Boolean,
         videoGain: Float,
         musicGain: Float
