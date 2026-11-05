@@ -225,16 +225,22 @@ class MainActivity : Activity() {
         })
 
         val previewCard = section("Preview komposisi")
-        val previewFrame = FrameLayout(this).apply {
+        // The preview is always a true 16:9 canvas, matching the 1920x1080 export.
+        // Its height is measured from its available width instead of using a fixed dp height.
+        val previewFrame = AspectRatioFrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             clipChildren = true
             clipToPadding = true
         }
         previewTexture = TextureView(this)
-        previewOverlay = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_XY }
+        // Export places the PNG centered without stretching; FIT_CENTER mirrors that behavior.
+        previewOverlay = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(Color.TRANSPARENT)
+        }
         previewFrame.addView(previewTexture, FrameLayout.LayoutParams(-1, -1))
         previewFrame.addView(previewOverlay, FrameLayout.LayoutParams(-1, -1))
-        previewCard.addView(previewFrame, LinearLayout.LayoutParams(-1, dp(190)).apply { topMargin = dp(12) })
+        previewCard.addView(previewFrame, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
         previewTexture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
             override fun onSurfaceTextureAvailable(surface: android.graphics.SurfaceTexture, width: Int, height: Int) { preparePreview() }
             override fun onSurfaceTextureSizeChanged(surface: android.graphics.SurfaceTexture, width: Int, height: Int) { updatePreviewTransform() }
@@ -460,11 +466,15 @@ class MainActivity : Activity() {
         val viewWidth = previewTexture.width.toFloat()
         val viewHeight = previewTexture.height.toFloat()
         if (viewWidth <= 0f || viewHeight <= 0f || previewVideoWidth <= 0 || previewVideoHeight <= 0) return
-        val fit = minOf(viewWidth / previewVideoWidth, viewHeight / previewVideoHeight)
-        val scale = fit * videoZoom
+        // Match Media3 Presentation.LAYOUT_SCALE_TO_FIT, then apply zoom around
+        // the center of the 16:9 output canvas. This changes gameplay only.
+        val source = android.graphics.RectF(
+            0f, 0f, previewVideoWidth.toFloat(), previewVideoHeight.toFloat()
+        )
+        val destination = android.graphics.RectF(0f, 0f, viewWidth, viewHeight)
         val matrix = Matrix().apply {
-            setScale(scale, scale)
-            postTranslate((viewWidth - previewVideoWidth * scale) / 2f, (viewHeight - previewVideoHeight * scale) / 2f)
+            setRectToRect(source, destination, Matrix.ScaleToFit.CENTER)
+            postScale(videoZoom, videoZoom, viewWidth / 2f, viewHeight / 2f)
         }
         previewTexture.setTransform(matrix)
     }
@@ -530,6 +540,19 @@ class MainActivity : Activity() {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         startActivity(Intent.createChooser(intent, "Bagikan video"))
+    }
+
+    /**
+     * Measures a 16:9 preview surface so its geometry matches the 1920x1080 export canvas
+     * on every phone width. Children are laid out to the exact same canvas bounds.
+     */
+    private class AspectRatioFrameLayout(context: Context) : FrameLayout(context) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val width = MeasureSpec.getSize(widthMeasureSpec)
+            val height = (width * 9f / 16f).toInt()
+            val exactHeight = MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
+            super.onMeasure(widthMeasureSpec, exactHeight)
+        }
     }
 
     companion object {
