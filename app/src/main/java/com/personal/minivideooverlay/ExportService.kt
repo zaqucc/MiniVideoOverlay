@@ -23,7 +23,7 @@ class ExportService : Service() {
         if (Build.VERSION.SDK_INT >= 26) {
             notifications.createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "Ekspor video", NotificationManager.IMPORTANCE_LOW).apply {
-                    description = "Progres rendering MiniVideoOverlay"
+                    description = "Progres rendering MotionIN"
                     setShowBadge(false)
                 }
             )
@@ -86,7 +86,7 @@ class ExportService : Service() {
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     }
-                }, "mvo-foreground-export")
+                }, "motionin-foreground-export")
                 worker?.start()
             }
         }
@@ -117,7 +117,7 @@ class ExportService : Service() {
         )
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_ID) else Notification.Builder(this)
         builder.setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle(if (completed) "MiniVideoOverlay" else "MiniVideoOverlay • Rendering")
+            .setContentTitle(if (completed) "MotionIN" else "MotionIN • Rendering")
             .setContentText(message)
             .setContentIntent(openIntent)
             .setOngoing(!completed)
