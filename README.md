@@ -1,14 +1,14 @@
-# MiniVideoOverlay 3.0.0 — Media3 Engine
+# MotionIN 3.0.0 — Media3 Engine
 
-Android native Kotlin application for composing a gameplay video, a transparent PNG layer, and an ordered music playlist. Export is handled by **AndroidX Media3 Transformer and Composition**. The previous custom MediaCodec/OpenGL/MediaMuxer encoder and custom PCM mixing pipeline have been removed.
+Android native Kotlin application for composing a gameplay video, a transparent PNG layer, and an ordered music playlist. Export is handled by **AndroidX Media3 Transformer and Composition**. The previous custom MediaCodec/OpenGL/MediaMuxer encoder and custom PCM mixing pipeline have been removed. The app is branded MotionIN.
 
 ## Preserved application features
 - Existing native Android UI and application ID `com.personal.minivideooverlay`.
 - Select one source video and one transparent PNG overlay through Android Storage Access Framework.
-- Optional multi-file music playlist in selection order.
+- Optional multi-file music playlist in selection order; no music-title popup is rendered in the exported video.
 - Playlist sequence loops until the source video sequence ends; the final item is truncated at the video end.
 - Separate 0–100% gain controls for original video audio and added playlist audio.
-- Music title/artist popup at the top-left, shown for 3 seconds at each readable playlist track start, with fade-in/fade-out.
+- Video image is enlarged to 108% while the PNG overlay retains its original full-canvas placement and scale.
 - 1920×1080 landscape MP4 output, H.264 video and AAC audio.
 - Export progress, foreground service, cancellation, preview, playback, and share actions.
 - Output is saved to `Movies/MiniVideoOverlay` using MediaStore pending publication and failure cleanup.
