@@ -14,7 +14,7 @@
         android:hardwareAccelerated="true"
         android:allowBackup="false"
         android:icon="@drawable/motionix_icon"
-        android:label="MOTIONIX"
+        android:label="MotionIN"
         android:supportsRtl="false"
         android:theme="@android:style/Theme.DeviceDefault.Light.DarkActionBar">
 
