@@ -6,7 +6,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Color
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
+import android.view.Surface
+import android.view.TextureView
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -28,6 +35,14 @@ class MainActivity : Activity() {
     private val musicUris = mutableListOf<Uri>()
     private var videoDurationMs = 0L
     private var lastOutputUri: Uri? = null
+    private var videoZoom = 1.08f
+    private var previewPlayer: MediaPlayer? = null
+    private var previewSurface: Surface? = null
+    private var previewVideoWidth = 0
+    private var previewVideoHeight = 0
+    private lateinit var previewTexture: TextureView
+    private lateinit var previewOverlay: ImageView
+    private lateinit var zoomInfo: TextView
 
     private lateinit var videoInfo: TextView
     private lateinit var pngInfo: TextView
@@ -69,12 +84,15 @@ class MainActivity : Activity() {
             pngUri = state.getString("png")?.let(Uri::parse)
             musicUris.addAll(state.getStringArrayList("music")?.map(Uri::parse) ?: emptyList())
             lastOutputUri = state.getString("output")?.let(Uri::parse)
+            videoZoom = state.getFloat("video_zoom", 1.08f).coerceIn(0.80f, 1.30f)
         }
         videoDurationMs = videoUri?.let(::readDuration) ?: 0L
         setContentView(buildUi())
         startInput.setText(savedInstanceState?.getString("trim_start") ?: "00:00:00")
         endInput.setText(savedInstanceState?.getString("trim_end") ?: formatTime(videoDurationMs))
         refreshControls()
+        refreshPreviewOverlay()
+        if (videoUri != null) preparePreview()
         lastOutputUri?.let { resultButtons.visibility = View.VISIBLE }
         if (ExportServiceState.isRunning) {
             progress.visibility = View.VISIBLE
@@ -101,6 +119,7 @@ class MainActivity : Activity() {
             unregisterReceiver(receiver)
             receiverRegistered = false
         }
+        releasePreview()
         super.onStop()
     }
 
@@ -109,6 +128,7 @@ class MainActivity : Activity() {
         outState.putString("png", pngUri?.toString())
         outState.putStringArrayList("music", ArrayList(musicUris.map(Uri::toString)))
         outState.putString("output", lastOutputUri?.toString())
+        outState.putFloat("video_zoom", videoZoom)
         outState.putString("trim_start", startInput.text.toString())
         outState.putString("trim_end", endInput.text.toString())
         super.onSaveInstanceState(outState)
@@ -130,11 +150,13 @@ class MainActivity : Activity() {
                 startInput.setText("00:00:00")
                 endInput.setText(formatTime(videoDurationMs))
                 status.text = "Video berhasil dipilih."
+                preparePreview()
             }
             REQ_PNG -> data.data?.let { uri ->
                 persist(uri)
                 pngUri = uri
                 status.text = "PNG berhasil dipilih."
+                refreshPreviewOverlay()
             }
             REQ_MUSIC -> {
                 val selected = mutableListOf<Uri>()
@@ -199,8 +221,34 @@ class MainActivity : Activity() {
         }
         root.addView(label("MotionIN", 24f, Color.WHITE, true))
         root.addView(label("Video editor", 13f, Color.LTGRAY).apply {
-            setPadding(0, dp(3), 0, dp(20))
+            setPadding(0, dp(3), 0, dp(14))
         })
+
+        val previewCard = section("Preview komposisi")
+        val previewFrame = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            clipChildren = true
+            clipToPadding = true
+        }
+        previewTexture = TextureView(this)
+        previewOverlay = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_XY }
+        previewFrame.addView(previewTexture, FrameLayout.LayoutParams(-1, -1))
+        previewFrame.addView(previewOverlay, FrameLayout.LayoutParams(-1, -1))
+        previewCard.addView(previewFrame, LinearLayout.LayoutParams(-1, dp(190)).apply { topMargin = dp(12) })
+        previewTexture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(surface: android.graphics.SurfaceTexture, width: Int, height: Int) { preparePreview() }
+            override fun onSurfaceTextureSizeChanged(surface: android.graphics.SurfaceTexture, width: Int, height: Int) { updatePreviewTransform() }
+            override fun onSurfaceTextureDestroyed(surface: android.graphics.SurfaceTexture): Boolean { releasePreview(); return true }
+            override fun onSurfaceTextureUpdated(surface: android.graphics.SurfaceTexture) = Unit
+        }
+        val zoomRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        zoomRow.addView(button("−") { changeZoom(-0.02f) }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(6); topMargin = dp(10) })
+        zoomInfo = label("108%", 14f, Color.WHITE, true).apply { gravity = Gravity.CENTER }
+        zoomRow.addView(zoomInfo, LinearLayout.LayoutParams(0, dp(44), 1f).apply { topMargin = dp(10) })
+        zoomRow.addView(button("＋") { changeZoom(0.02f) }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { leftMargin = dp(6); topMargin = dp(10) })
+        previewCard.addView(zoomRow)
+        previewCard.addView(label("Atur ukuran gameplay. PNG overlay tidak ikut diperbesar.", 11f, Color.LTGRAY).apply { setPadding(0, dp(7), 0, 0) })
+        root.addView(previewCard, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
 
         val trim = section("Rentang video")
         trim.addView(label("Mulai · HH:MM:SS", 12f, Color.LTGRAY))
@@ -314,6 +362,7 @@ class MainActivity : Activity() {
 
     private fun refreshControls() {
         if (!::videoInfo.isInitialized) return
+        zoomInfo.text = "${(videoZoom * 100).toInt()}%"
         videoInfo.text = videoUri?.let { "Dipilih: ${displayName(it)} · ${formatTime(videoDurationMs)}" } ?: "Belum ada video"
         pngInfo.text = pngUri?.let { "Dipilih: ${displayName(it)}" } ?: "Belum ada PNG"
         musicInfo.text = if (musicUris.isEmpty()) "Belum ada musik (opsional)" else musicUris.mapIndexed { i, u -> "${i + 1}. ${displayName(u)}" }.joinToString("\n") + "\n${musicUris.size}/4 file"
@@ -350,6 +399,7 @@ class MainActivity : Activity() {
             putExtra(ExportService.EXTRA_MUSIC_VOLUME, 100)
             putExtra(ExportService.EXTRA_TRIM_START_MS, start)
             putExtra(ExportService.EXTRA_TRIM_END_MS, end)
+            putExtra(ExportService.EXTRA_VIDEO_ZOOM, videoZoom)
         }
         lastOutputUri = null
         resultButtons.visibility = View.GONE
@@ -365,6 +415,79 @@ class MainActivity : Activity() {
             status.text = "Ekspor tidak dapat dimulai: ${t.message ?: t.javaClass.simpleName}"
             refreshControls()
         }
+    }
+
+    private fun changeZoom(delta: Float) {
+        videoZoom = (videoZoom + delta).coerceIn(0.80f, 1.30f)
+        zoomInfo.text = "${(videoZoom * 100).toInt()}%"
+        updatePreviewTransform()
+    }
+
+    private fun preparePreview() {
+        val uri = videoUri ?: return
+        val texture = previewTexture.surfaceTexture ?: return
+        releasePreview()
+        val surface = Surface(texture)
+        previewSurface = surface
+        runCatching {
+            val player = MediaPlayer()
+            previewPlayer = player
+            player.setDataSource(this, uri)
+            player.setSurface(surface)
+            player.isLooping = true
+            player.setVolume(0f, 0f)
+            player.setOnVideoSizeChangedListener { _, width, height ->
+                previewVideoWidth = width
+                previewVideoHeight = height
+                updatePreviewTransform()
+            }
+            player.setOnPreparedListener { mp ->
+                previewVideoWidth = mp.videoWidth
+                previewVideoHeight = mp.videoHeight
+                updatePreviewTransform()
+                mp.start()
+            }
+            player.setOnErrorListener { _, _, _ -> status.text = "Preview tidak dapat diputar pada format video ini."; true }
+            player.prepareAsync()
+        }.onFailure {
+            releasePreview()
+            status.text = "Preview gagal dibuka: ${it.message ?: "format tidak didukung"}"
+        }
+    }
+
+    private fun updatePreviewTransform() {
+        if (!::previewTexture.isInitialized) return
+        val viewWidth = previewTexture.width.toFloat()
+        val viewHeight = previewTexture.height.toFloat()
+        if (viewWidth <= 0f || viewHeight <= 0f || previewVideoWidth <= 0 || previewVideoHeight <= 0) return
+        val fit = minOf(viewWidth / previewVideoWidth, viewHeight / previewVideoHeight)
+        val scale = fit * videoZoom
+        val matrix = Matrix().apply {
+            setScale(scale, scale)
+            postTranslate((viewWidth - previewVideoWidth * scale) / 2f, (viewHeight - previewVideoHeight * scale) / 2f)
+        }
+        previewTexture.setTransform(matrix)
+    }
+
+    private fun refreshPreviewOverlay() {
+        if (!::previewOverlay.isInitialized) return
+        val uri = pngUri
+        if (uri == null) { previewOverlay.setImageDrawable(null); return }
+        val bitmap = runCatching { contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } }.getOrNull()
+        previewOverlay.setImageBitmap(bitmap)
+    }
+
+    private fun releasePreview() {
+        runCatching { previewPlayer?.stop() }
+        runCatching { previewPlayer?.release() }
+        previewPlayer = null
+        runCatching { previewSurface?.release() }
+        previewSurface = null
+    }
+
+    override fun onDestroy() {
+        releasePreview()
+        super.onDestroy()
     }
 
     private fun parseTime(value: String): Long? {
