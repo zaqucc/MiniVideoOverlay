@@ -5,10 +5,8 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
-import android.graphics.Typeface
 import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
@@ -27,7 +25,6 @@ import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.ScaleAndRotateTransformation
-import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
@@ -118,7 +115,8 @@ class ExportEngine(private val appContext: Context) {
             outputUri = pendingUri
             try {
                 appContext.contentResolver.openOutputStream(pendingUri, "w")?.use { destination ->
-                    renderedFile.inputStream().use { source -> source.copyTo(destination) }
+                    // A larger copy buffer reduces small read/write operations for long 1080p exports.
+                    renderedFile.inputStream().use { source -> source.copyTo(destination, 1024 * 1024) }
                 } ?: throw ExportException("Tidak dapat membuka file tujuan di MediaStore.")
                 checkCancelled()
                 finalizePendingOutput(pendingUri)
@@ -256,6 +254,9 @@ class ExportEngine(private val appContext: Context) {
                     .setiFrameIntervalSeconds(2f)
                     .build()
                 val encoderFactory = DefaultEncoderFactory.Builder(appContext)
+                    // Keep the requested H.264 settings when supported, but allow codec fallback
+                    // on devices whose hardware encoder rejects a particular configuration.
+                    .setEnableFallback(true)
                     .setEnableFormatFallback(true)
                     .setRequestedVideoEncoderSettings(encoderSettings)
                     .build()
@@ -324,11 +325,14 @@ class ExportEngine(private val appContext: Context) {
         if (bounds.outWidth > 12_000 || bounds.outHeight > 12_000) {
             throw ExportException("Dimensi PNG terlalu besar; maksimum 12000×12000.")
         }
+        // The final composition is 1920x1080. Decoding PNGs far beyond the output canvas
+        // adds memory pressure and decode time without adding visible output detail.
         var sampleSize = 1
-        while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > 3_840) sampleSize *= 2
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > 1_920) sampleSize *= 2
         val options = BitmapFactory.Options().apply {
             inSampleSize = sampleSize
             inPreferredConfig = Bitmap.Config.ARGB_8888
+            inScaled = false
         }
         val decoded = appContext.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
             ?: throw ExportException("PNG tidak valid atau tidak dapat didekode.")
@@ -336,24 +340,31 @@ class ExportEngine(private val appContext: Context) {
             decoded.recycle()
             throw ExportException("PNG yang dipilih tidak memiliki transparansi alpha.")
         }
-        val canvasBitmap = Bitmap.createBitmap(OverlayConfig.OUTPUT_WIDTH, OverlayConfig.OUTPUT_HEIGHT, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(canvasBitmap)
-        canvas.drawColor(Color.TRANSPARENT)
-        val scale = min(
-            OverlayConfig.OUTPUT_WIDTH.toFloat() / decoded.width,
-            OverlayConfig.OUTPUT_HEIGHT.toFloat() / decoded.height
-        )
-        val width = decoded.width * scale
-        val height = decoded.height * scale
-        val destination = RectF(
-            (OverlayConfig.OUTPUT_WIDTH - width) / 2f,
-            (OverlayConfig.OUTPUT_HEIGHT - height) / 2f,
-            (OverlayConfig.OUTPUT_WIDTH + width) / 2f,
-            (OverlayConfig.OUTPUT_HEIGHT + height) / 2f
-        )
-        canvas.drawBitmap(decoded, null, destination, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
-        decoded.recycle()
-        return canvasBitmap
+        try {
+            val canvasBitmap = Bitmap.createBitmap(
+                OverlayConfig.OUTPUT_WIDTH,
+                OverlayConfig.OUTPUT_HEIGHT,
+                Bitmap.Config.ARGB_8888
+            )
+            val canvas = Canvas(canvasBitmap)
+            // A newly allocated ARGB bitmap is already transparent; no full-canvas clear is needed.
+            val scale = min(
+                OverlayConfig.OUTPUT_WIDTH.toFloat() / decoded.width,
+                OverlayConfig.OUTPUT_HEIGHT.toFloat() / decoded.height
+            )
+            val width = decoded.width * scale
+            val height = decoded.height * scale
+            val destination = RectF(
+                (OverlayConfig.OUTPUT_WIDTH - width) / 2f,
+                (OverlayConfig.OUTPUT_HEIGHT - height) / 2f,
+                (OverlayConfig.OUTPUT_WIDTH + width) / 2f,
+                (OverlayConfig.OUTPUT_HEIGHT + height) / 2f
+            )
+            canvas.drawBitmap(decoded, null, destination, Paint(Paint.FILTER_BITMAP_FLAG))
+            return canvasBitmap
+        } finally {
+            decoded.recycle()
+        }
     }
 
 
@@ -367,10 +378,12 @@ class ExportEngine(private val appContext: Context) {
                 val format = extractor.getTrackFormat(index)
                 val mime = format.getString(android.media.MediaFormat.KEY_MIME).orEmpty()
                 if (mime.startsWith("video/") && format.containsKey(android.media.MediaFormat.KEY_FRAME_RATE)) {
-                    format.getInteger(android.media.MediaFormat.KEY_FRAME_RATE)
+                    runCatching {
+                        format.getNumber(android.media.MediaFormat.KEY_FRAME_RATE).toFloat()
+                    }.getOrNull()
                 } else null
-            } ?: 30
-            if (frameRate >= 50) OverlayConfig.VIDEO_BITRATE_60FPS else OverlayConfig.VIDEO_BITRATE
+            } ?: 30f
+            if (frameRate >= 50f) OverlayConfig.VIDEO_BITRATE_60FPS else OverlayConfig.VIDEO_BITRATE
         } catch (_: Throwable) {
             OverlayConfig.VIDEO_BITRATE
         } finally {
@@ -419,151 +432,3 @@ class ExportEngine(private val appContext: Context) {
     }
 }
 
-private data class MusicTrackCue(val title: String, val artist: String, val startUs: Long, val durationUs: Long)
-
-private class MusicMetadataReader(private val context: Context) {
-    fun read(uris: List<Uri>): List<MusicTrackCue> {
-        var cursor = 0L
-        val result = mutableListOf<MusicTrackCue>()
-        uris.forEach { uri ->
-            val retriever = android.media.MediaMetadataRetriever()
-            var title: String? = null
-            var artist: String? = null
-            var durationUs = 0L
-            try {
-                retriever.setDataSource(context, uri)
-                title = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE)
-                artist = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ARTIST)
-                durationUs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
-                    ?.toLongOrNull()?.coerceAtLeast(0L)?.times(1_000L) ?: 0L
-            } catch (_: Throwable) {
-                // MediaExtractor below is used as a metadata-only duration fallback.
-            } finally {
-                runCatching { retriever.release() }
-            }
-            if (durationUs <= 0L) durationUs = readDurationUs(uri)
-            if (durationUs > 0L) {
-                val fallback = displayName(uri).substringBeforeLast('.').ifBlank { "Music" }
-                result += MusicTrackCue(
-                    title?.takeIf { it.isNotBlank() } ?: fallback,
-                    artist?.takeIf { it.isNotBlank() } ?: "Unknown artist",
-                    cursor,
-                    durationUs
-                )
-                cursor += durationUs
-            }
-        }
-        return result
-    }
-
-    private fun readDurationUs(uri: Uri): Long {
-        val extractor = android.media.MediaExtractor()
-        var descriptor: ParcelFileDescriptor? = null
-        return try {
-            descriptor = context.contentResolver.openFileDescriptor(uri, "r") ?: return 0L
-            extractor.setDataSource(descriptor.fileDescriptor)
-            (0 until extractor.trackCount).firstNotNullOfOrNull { index ->
-                val format = extractor.getTrackFormat(index)
-                val mime = format.getString(android.media.MediaFormat.KEY_MIME).orEmpty()
-                if (mime.startsWith("audio/") && format.containsKey(android.media.MediaFormat.KEY_DURATION)) {
-                    format.getLong(android.media.MediaFormat.KEY_DURATION).coerceAtLeast(0L)
-                } else null
-            } ?: 0L
-        } catch (_: Throwable) {
-            0L
-        } finally {
-            runCatching { extractor.release() }
-            runCatching { descriptor?.close() }
-        }
-    }
-
-    private fun displayName(uri: Uri): String = runCatching {
-        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) cursor.getString(0).orEmpty() else ""
-        }.orEmpty()
-    }.getOrDefault("")
-}
-
-@OptIn(UnstableApi::class)
-private class MusicPopupOverlay(cues: List<MusicTrackCue>) : BitmapOverlay() {
-    private val trackCues = cues
-    private val totalPlaylistUs = cues.sumOf { it.durationUs }
-    private val transparent = Bitmap.createBitmap(CARD_WIDTH, CARD_HEIGHT, Bitmap.Config.ARGB_8888)
-    private val bitmapCache = HashMap<Int, Bitmap>()
-    private val alphaSettings = Array(65) { index ->
-        StaticOverlaySettings.Builder()
-            .setAlphaScale(index / 64f)
-            .setScale(1f, 1f)
-            .setBackgroundFrameAnchor(-0.95f, 0.90f)
-            .setOverlayFrameAnchor(-1f, 1f)
-            .build()
-    }
-
-    override fun getBitmap(presentationTimeUs: Long): Bitmap {
-        val active = activeCue(presentationTimeUs) ?: return transparent
-        return bitmapCache.getOrPut(active.first) { drawCard(active.second) }
-    }
-
-    override fun getOverlaySettings(presentationTimeUs: Long): androidx.media3.common.OverlaySettings {
-        val active = activeCue(presentationTimeUs) ?: return alphaSettings[0]
-        val elapsed = (presentationTimeUs % totalPlaylistUs) - active.second.startUs
-        val fadeIn = (elapsed / FADE_IN_US.toFloat()).coerceIn(0f, 1f)
-        val fadeOut = ((DISPLAY_US - elapsed) / FADE_OUT_US.toFloat()).coerceIn(0f, 1f)
-        val alpha = min(fadeIn, fadeOut)
-        return alphaSettings[(alpha * 64f).roundToInt().coerceIn(0, 64)]
-    }
-
-    private fun activeCue(timeUs: Long): Pair<Int, MusicTrackCue>? {
-        if (trackCues.isEmpty() || totalPlaylistUs <= 0L) return null
-        val cycleTime = timeUs.coerceAtLeast(0L) % totalPlaylistUs
-        val index = trackCues.indexOfLast { it.startUs <= cycleTime }
-        if (index < 0) return null
-        val cue = trackCues[index]
-        val elapsed = cycleTime - cue.startUs
-        return if (elapsed in 0 until min(DISPLAY_US, cue.durationUs)) index to cue else null
-    }
-
-    private fun drawCard(cue: MusicTrackCue): Bitmap {
-        val bitmap = Bitmap.createBitmap(CARD_WIDTH, CARD_HEIGHT, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        val background = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(218, 10, 17, 27) }
-        val accent = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(82, 197, 255) }
-        val icon = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.rgb(105, 207, 255); textSize = 54f; typeface = Typeface.create("sans-serif", Typeface.BOLD)
-        }
-        val title = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE; textSize = 32f; typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        }
-        val artist = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.rgb(190, 205, 220); textSize = 24f; typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-        }
-        canvas.drawRoundRect(RectF(0f, 0f, CARD_WIDTH.toFloat(), CARD_HEIGHT.toFloat()), 18f, 18f, background)
-        canvas.drawRoundRect(RectF(0f, 0f, 9f, CARD_HEIGHT.toFloat()), 5f, 5f, accent)
-        canvas.drawText("♫", 32f, 105f, icon)
-        canvas.drawText(ellipsize(cue.title, title, 480f), 108f, 78f, title)
-        canvas.drawText(ellipsize(cue.artist.ifBlank { "NOW PLAYING" }, artist, 480f), 108f, 119f, artist)
-        return bitmap
-    }
-
-    private fun ellipsize(value: String, paint: Paint, maxWidth: Float): String {
-        if (paint.measureText(value) <= maxWidth) return value
-        var end = value.length
-        while (end > 0 && paint.measureText(value.substring(0, end) + "…") > maxWidth) end--
-        return value.substring(0, end).trimEnd() + "…"
-    }
-
-    override fun release() {
-        bitmapCache.values.forEach { if (!it.isRecycled) it.recycle() }
-        bitmapCache.clear()
-        if (!transparent.isRecycled) transparent.recycle()
-        super.release()
-    }
-
-    companion object {
-        private const val CARD_WIDTH = 640
-        private const val CARD_HEIGHT = 150
-        private const val DISPLAY_US = 3_000_000L
-        private const val FADE_IN_US = 250_000L
-        private const val FADE_OUT_US = 350_000L
-    }
-}
