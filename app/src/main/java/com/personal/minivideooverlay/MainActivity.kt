@@ -227,7 +227,7 @@ class MainActivity : Activity() {
             setHint("00:00:00")
             textSize = 18f
             inputType = InputType.TYPE_CLASS_DATETIME or InputType.TYPE_DATETIME_VARIATION_TIME
-            singleLine = true
+            isSingleLine = true
             setPadding(dp(12), dp(10), dp(12), dp(10))
             background = android.graphics.drawable.GradientDrawable().apply {
                 setColor(Color.rgb(37, 45, 57)); cornerRadius = dp(10).toFloat()
@@ -283,7 +283,7 @@ class MainActivity : Activity() {
         }
         root.addView(resultButtons, fullWidth(dp(46)))
         return ScrollView(this).apply {
-            setBackgroundColor(background)
+            setBackgroundColor(Color.rgb(15, 18, 23))
             isFillViewport = true
             addView(root)
         }
